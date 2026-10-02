@@ -1,0 +1,15 @@
+; tfc_teams_mm.def - export GiveFnptrsToDll undecorated. metamod-p looks it up
+; by its plain name with GetProcAddress before Meta_Query; MSVC would
+; otherwise export the __stdcall-decorated "_GiveFnptrsToDll@8" and metamod
+; would reject the DLL as "badf". Same file as Weapon Changer Plus's.
+
+LIBRARY "tfc_teams_mm"
+
+EXPORTS
+	GiveFnptrsToDll
+	GetEntityAPI2
+	GetEngineFunctions
+	GetEngineFunctions_Post
+	Meta_Query
+	Meta_Attach
+	Meta_Detach

@@ -1,0 +1,26 @@
+# Visual Studio
+.vs/
+bin/
+obj/
+*.user
+*.suo
+*.ilk
+*.pdb
+*.exp
+*.lib
+*.obj
+*.tlog
+*.idb
+*.recipe
+
+# Linux build
+obj_linux/
+*.o
+
+# Built plugins (attach these to a GitHub Release instead)
+*.dll
+*.so
+
+# Written by the plugin at runtime
+tt_trace.log
+tt_stats.txt

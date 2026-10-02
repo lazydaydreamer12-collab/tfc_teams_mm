@@ -1,0 +1,12 @@
+/* Only metamod's entry points are exported from the .so. */
+{
+	global:
+		GiveFnptrsToDll;
+		GetEntityAPI2;
+		GetEngineFunctions;
+		GetEngineFunctions_Post;
+		Meta_Query;
+		Meta_Attach;
+		Meta_Detach;
+	local: *;
+};

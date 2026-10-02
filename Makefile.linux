@@ -1,0 +1,55 @@
+# Linux build of TFC Teams (metamod-p plugin) -> tfc_teams_mm_mm_i386.so
+#
+#   make -f Makefile.linux                 (needs a 32-bit g++: on Debian/Ubuntu "apt install g++-multilib")
+#   make -f Makefile.linux SDK=/path/to/metamod-p    if the metamod-p source (the folder holding
+#                                  metamod/ and hlsdk/) is not found by itself
+#
+# By default it uses the parent folder when that holds metamod/ and hlsdk/ (the
+# layout in tfc/addons/metamod/metamod_sdk/), else ../../sdk/metamod-p.
+#
+# The .so needs no C++ runtime (built without exceptions/RTTI; linux_compat.cpp
+# supplies new/delete) and nothing newer than GLIBC_2.4 (linux_compat.h), so it
+# loads on old server distros as well as new ones. Only metamod's entry points
+# are exported (linux_exports.map).
+
+SDK      ?= $(if $(wildcard ../metamod/meta_api.h),..,../../sdk/metamod-p)
+CXX      ?= g++
+TARGET    = tfc_teams_mm_mm_i386.so
+
+SRCS      = dllapi.cpp h_export.cpp meta_api.cpp sdk_util.cpp \
+            tt_balance.cpp tt_config.cpp tt_engine.cpp tt_map.cpp \
+            tt_players.cpp tt_scramble.cpp tt_stats.cpp linux_compat.cpp
+OBJDIR    = obj_linux
+OBJS      = $(SRCS:%.cpp=$(OBJDIR)/%.o)
+
+INCLUDES  = -I$(SDK)/metamod -I$(SDK)/hlsdk/dlls -I$(SDK)/hlsdk/engine \
+            -I$(SDK)/hlsdk/common -I$(SDK)/hlsdk/pm_shared
+CXXFLAGS  = -m32 -march=i686 -mtune=generic -O2 -fPIC -fvisibility=hidden \
+            -fno-strict-aliasing -std=gnu++11 -Dlinux -D__linux__ \
+            -fno-exceptions -fno-rtti -fno-threadsafe-statics \
+            -U_FORTIFY_SOURCE -fno-stack-protector -include linux_compat.h \
+            -Wall -Wno-attributes -Wno-unused-parameter -Wno-write-strings \
+            -Wno-class-memaccess -Wno-stringop-truncation
+LDFLAGS   = -m32 -shared -nostdlib++ -static-libgcc -Wl,--no-undefined \
+            -Wl,--hash-style=both -Wl,--version-script=linux_exports.map
+LIBS      = -Wl,--no-as-needed -l:libdl.so.2 -lm
+
+all: $(TARGET)
+
+$(TARGET): $(OBJS) linux_exports.map
+	$(CXX) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+	strip --strip-unneeded $@
+	@# Refuse a .so that needs a glibc newer than 2.4 - older servers can't load it.
+	@v=$$(objdump -T $@ | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1); \
+	if [ "$$(printf '%s\nGLIBC_2.4\n' "$$v" | sort -V | tail -1)" != "GLIBC_2.4" ]; then \
+		echo "ERROR: $@ needs $$v (newer than 2.4):"; objdump -T $@ | grep -E 'GLIBC_2\.([5-9]|[1-9][0-9])'; \
+		rm -f $@; exit 1; fi; echo "glibc check OK: needs at most $$v"
+
+$(OBJDIR)/%.o: %.cpp tt_common.h tt_stats.h sdk_compat.h linux_compat.h
+	@mkdir -p $(OBJDIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+clean:
+	rm -rf $(OBJDIR) $(TARGET)
+
+.PHONY: all clean
