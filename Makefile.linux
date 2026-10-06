@@ -11,6 +11,10 @@
 # supplies new/delete) and nothing newer than GLIBC_2.4 (linux_compat.h), so it
 # loads on old server distros as well as new ones. Only metamod's entry points
 # are exported (linux_exports.map).
+#
+# HTTPS for the Discord post (tt_net.cpp) uses BearSSL 0.6 (MIT licence),
+# unpacked from third_party/bearssl-0.6.tar.gz and built into obj_linux/libbearssl.a. pthread is
+# looked up at run time, so no libpthread version gets tied in either.
 
 SDK      ?= $(if $(wildcard ../metamod/meta_api.h),..,../../sdk/metamod-p)
 CXX      ?= g++
@@ -18,26 +22,42 @@ TARGET    = tfc_teams_mm_mm_i386.so
 
 SRCS      = dllapi.cpp h_export.cpp meta_api.cpp sdk_util.cpp \
             tt_balance.cpp tt_config.cpp tt_engine.cpp tt_map.cpp \
-            tt_players.cpp tt_scramble.cpp tt_stats.cpp linux_compat.cpp
+            tt_players.cpp tt_scramble.cpp tt_stats.cpp linux_compat.cpp \
+            tt_crypto.cpp tt_secret.cpp tt_net.cpp tt_names.cpp tt_feed.cpp
 OBJDIR    = obj_linux
 OBJS      = $(SRCS:%.cpp=$(OBJDIR)/%.o)
 
 INCLUDES  = -I$(SDK)/metamod -I$(SDK)/hlsdk/dlls -I$(SDK)/hlsdk/engine \
-            -I$(SDK)/hlsdk/common -I$(SDK)/hlsdk/pm_shared
+            -I$(SDK)/hlsdk/common -I$(SDK)/hlsdk/pm_shared -Ithird_party/bearssl/inc
+
+BEARSSL     = third_party/bearssl
+BEARSSL_TGZ = third_party/bearssl-0.6.tar.gz
+# BearSSL's source is kept as one archive; unpack it the first time.
+ifeq ($(wildcard $(BEARSSL)/inc/bearssl.h),)
+$(shell tar xzf $(BEARSSL_TGZ) -C third_party)
+endif
+BEARSSL_SRC = $(shell find $(BEARSSL)/src -name '*.c')
+BEARSSL_OBJ = $(patsubst $(BEARSSL)/src/%.c,$(OBJDIR)/bearssl/%.o,$(BEARSSL_SRC))
+BEARSSL_LIB = $(OBJDIR)/libbearssl.a
+CC       ?= gcc
+CFLAGS    = -m32 -march=i686 -mtune=generic -O2 -fPIC -fvisibility=hidden \
+            -ffunction-sections -fdata-sections -U_FORTIFY_SOURCE -fno-stack-protector \
+            -include linux_compat.h -I$(BEARSSL)/inc -I$(BEARSSL)/src -w
 CXXFLAGS  = -m32 -march=i686 -mtune=generic -O2 -fPIC -fvisibility=hidden \
             -fno-strict-aliasing -std=gnu++11 -Dlinux -D__linux__ \
             -fno-exceptions -fno-rtti -fno-threadsafe-statics \
             -U_FORTIFY_SOURCE -fno-stack-protector -include linux_compat.h \
+            -ffunction-sections -fdata-sections \
             -Wall -Wno-attributes -Wno-unused-parameter -Wno-write-strings \
             -Wno-class-memaccess -Wno-stringop-truncation
 LDFLAGS   = -m32 -shared -nostdlib++ -static-libgcc -Wl,--no-undefined \
-            -Wl,--hash-style=both -Wl,--version-script=linux_exports.map
+            -Wl,--hash-style=both -Wl,--version-script=linux_exports.map -Wl,--gc-sections
 LIBS      = -Wl,--no-as-needed -l:libdl.so.2 -lm
 
 all: $(TARGET)
 
-$(TARGET): $(OBJS) linux_exports.map
-	$(CXX) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+$(TARGET): $(OBJS) $(BEARSSL_LIB) linux_exports.map
+	$(CXX) $(LDFLAGS) -o $@ $(OBJS) $(BEARSSL_LIB) $(LIBS)
 	strip --strip-unneeded $@
 	@# Refuse a .so that needs a glibc newer than 2.4 - older servers can't load it.
 	@v=$$(objdump -T $@ | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1); \
@@ -45,9 +65,17 @@ $(TARGET): $(OBJS) linux_exports.map
 		echo "ERROR: $@ needs $$v (newer than 2.4):"; objdump -T $@ | grep -E 'GLIBC_2\.([5-9]|[1-9][0-9])'; \
 		rm -f $@; exit 1; fi; echo "glibc check OK: needs at most $$v"
 
-$(OBJDIR)/%.o: %.cpp tt_common.h tt_stats.h sdk_compat.h linux_compat.h
+$(OBJDIR)/%.o: %.cpp tt_common.h tt_stats.h tt_net.h tt_crypto.h sdk_compat.h linux_compat.h
 	@mkdir -p $(OBJDIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJDIR)/bearssl/%.o: $(BEARSSL)/src/%.c
+	@mkdir -p $(dir $@)
+	@$(CC) $(CFLAGS) -c $< -o $@
+
+$(BEARSSL_LIB): $(BEARSSL_OBJ)
+	@rm -f $@
+	ar rcs $@ $(BEARSSL_OBJ)
 
 clean:
 	rm -rf $(OBJDIR) $(TARGET)

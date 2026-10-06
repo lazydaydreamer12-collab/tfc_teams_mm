@@ -6,6 +6,7 @@
 
 #include "sdk_util.h"
 #include "tt_common.h"
+#include "tt_net.h"
 #include "tt_stats.h"
 
 C_DLLEXPORT int GetEngineFunctions_Post(enginefuncs_t *pengfuncsFromEngine, int *interfaceVersion);
@@ -177,8 +178,8 @@ plugin_info_t Plugin_info =
 {
 	META_INTERFACE_VERSION,
 	"TFC Teams (balance + scramble)",
-	"1.0.0",
-	"2026/09/30",
+	"1.1.0",
+	"2026/10/06",
 	"custom",
 	"",
 	"TFCTEAMS",
@@ -231,6 +232,11 @@ C_DLLEXPORT FORCE_STACK_ALIGN int Meta_Attach(PLUG_LOADTIME now,
 	TT_RegisterServerCommands();
 	TT_StatsRegisterCommands();
 	TT_StatsInit(); // before TT_OnMapStart below, which starts the map's stats
+	TT_NamesRegisterCommands();
+	TT_FeedRegisterCommands();
+	TT_SecretRegisterCommands();
+	TT_NamesInit();
+	TT_NetInit();   // reads the stored Discord webhook
 
 	// Loaded into a map that is already running ("meta load" mid-game):
 	// ServerActivate has been and gone, so do its work now. The team layout
@@ -247,6 +253,8 @@ C_DLLEXPORT FORCE_STACK_ALIGN int Meta_Detach(PLUG_LOADTIME /*now*/,
 {
 	// Nothing else persistent to undo: no vtable hooks, no entities, no
 	// cvars. metamod-p disables our server commands itself when we unload.
+	TT_NetShutdown();
+	TT_NamesShutdown();
 	TT_StatsShutdown();
 	TT_ReleaseInstance();
 	return TRUE;

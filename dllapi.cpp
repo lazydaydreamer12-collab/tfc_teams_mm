@@ -13,6 +13,7 @@
 
 #include "tt_common.h"
 #include "tt_stats.h"
+#include "tt_net.h"
 
 // Every entity key the map sets, before the entities spawn. The only place
 // info_tfdetect's team limits and civilian teams can be seen - TFC keeps them
@@ -35,6 +36,8 @@ void TT_OnMapStart(void)
 	TT_BalanceReset();
 	TT_ScrambleReset();
 	TT_StatsMapStart();
+	TT_NamesMapStart();
+	TT_SecretLoad();     // picks up tt_secret_import.txt if one was dropped in
 }
 
 static void TT_ServerActivate(edict_t *pEdictList, int edictCount, int clientMax)
@@ -53,6 +56,7 @@ static void TT_ClientPutInServer(edict_t *pEntity)
 
 static void TT_ClientDisconnect(edict_t *pEntity)
 {
+	TT_NamesDisconnect(pEntity);
 	TT_StatsPlayerDisconnect(pEntity);
 	TT_PlayerDisconnect(pEntity);
 	RETURN_META(MRES_IGNORED);
@@ -75,6 +79,15 @@ static void TT_ClientCommand(edict_t *pEntity)
 		int team = atoi(CMD_ARGV(1));
 		if (TT_JoinTeamBlocked(pEntity, team))
 			RETURN_META(MRES_SUPERCEDE);
+		// 1-4 = a team picked in the menu, 5 = the Auto Assign button.
+		bool real = team >= 1 && team <= 5 && (team == 5 || (int)pEntity->v.team != team);
+		if (team == 5 && TT_AutoAssign(pEntity))
+		{
+			TT_NamesTeamChoice(pEntity, true);
+			RETURN_META(MRES_SUPERCEDE);
+		}
+		if (real)
+			TT_NamesTeamChoice(pEntity, team == 5);
 		RETURN_META(MRES_IGNORED);
 	}
 
@@ -102,6 +115,8 @@ static void TT_StartFrame(void)
 	{
 		TT_PlayersFrame();
 		TT_StatsFrame();
+		TT_NamesFrame();
+		TT_FeedFrame();
 		TT_ScrambleFrame();
 		TT_BalanceFrame();
 	}
@@ -121,6 +136,7 @@ static void TT_PlayerPreThink(edict_t *pEntity)
 static void TT_ServerDeactivate(void)
 {
 	TT_StatsMapEnd();
+	TT_NamesMapEnd();
 	RETURN_META(MRES_IGNORED);
 }
 

@@ -11,12 +11,14 @@ struct TTStatsConfig
 	float saveInterval;    // seconds between saves of tt_stats.txt
 	int   summary;         // end-of-map summary in chat
 	float wKill, wCarrierKill, wCap, wPickup, wTeamkill;   // rating points
+	float wHeal;                                         // rating points per 100 health healed (medic)
 	float newRating;       // rating for someone never seen (0 = median of known players)
 	int   window;          // !stats / !top10: 0 chat lines, 1 window (MOTD panel), 2 paged menu
 	float menuTime;        // seconds the paged menu stays up (0 = until closed)
 	int   debugCaps;       // CAPDBG lines in tt_trace.log
 	char  capWord[24];     // a goal whose name contains this, reached with an item, is a capture
 	char  returnWord[24];  // ...unless its name (or one activated with it) contains this
+	int   rivals;          // head-to-head: who kills whom (!rival, rivalry of the map)
 };
 extern TTStatsConfig g_st;
 void TT_StatsConfigDefaults(void);
@@ -58,5 +60,10 @@ bool TT_StatsMenuSelect(edict_t *p, int key);
 void TT_StatsMenuGone(edict_t *p);
 
 void TT_StatsRegisterCommands(void);
+
+// For the name tracker.
+void TT_StatsKeyOf(edict_t *p, char *out, size_t len);   // SteamID key, "BOT:<name>", "" = not known yet
+void TT_StatsMapNumbers(int idx, int *kills, int *deaths, int *caps, float *points);
+int  TT_StatsTeamScoreOf(int team);
 
 #endif

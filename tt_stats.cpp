@@ -57,6 +57,7 @@
 
 #include "tt_common.h"
 #include "tt_stats.h"
+#include "tt_net.h"
 
 // ---------------------------------------------------------------------------
 // Weapons
@@ -192,7 +193,10 @@ struct TTCounts
 	int caps, pickups, carrierKills, carrierDeaths;
 	int shots, hits, headshots;
 	int builds, buildKills;      // sentries/dispensers built; enemy ones destroyed
+	int heals, cures;            // medic: team-mates healed / cured (TFC's Medic_Heal, Medic_Cured_*, Medic_Doused_Fire)
+	int bestStreak;              // most enemy kills without dying (a best, not a total)
 	float damage, seconds;
+	float healed;                // medic: health given to team-mates
 	TTWeaponStat w[W_COUNT];
 };
 
@@ -231,6 +235,9 @@ static void CountsAdd(TTCounts &a, const TTCounts &b)
 	a.caps += b.caps; a.pickups += b.pickups; a.carrierKills += b.carrierKills; a.carrierDeaths += b.carrierDeaths;
 	a.shots += b.shots; a.hits += b.hits; a.headshots += b.headshots;
 	a.builds += b.builds; a.buildKills += b.buildKills;
+	a.heals += b.heals; a.cures += b.cures; a.healed += b.healed;
+	if (b.bestStreak > a.bestStreak)
+		a.bestStreak = b.bestStreak;
 	a.damage += b.damage; a.seconds += b.seconds;
 	for (int i = 0; i < W_COUNT; i++)
 	{
@@ -249,7 +256,7 @@ static void BlockAdd(TTBlock &a, const TTBlock &b)
 
 static bool CountsUsed(const TTCounts &b)
 {
-	return b.seconds >= 1.0f || b.kills || b.deaths || b.shots || b.hits || b.caps || b.builds;
+	return b.seconds >= 1.0f || b.kills || b.deaths || b.shots || b.hits || b.caps || b.builds || b.heals || b.cures;
 }
 
 struct TTRecord
@@ -266,6 +273,29 @@ struct TTRecord
 static std::vector<TTRecord> g_db;
 static bool  g_dbDirty = false;
 static float g_nextSave = 0;
+
+// HEAD-TO-HEAD. Who killed whom, per pair of players (record indexes a < b):
+// ab = times a killed b, ba = times b killed a; mab/mba the same for this map.
+// Kept for pairs where at least one of the two is a person (bot v bot pairs
+// would be most of the table and nobody looks at them). Saved as "V" lines.
+struct TTVs { int a, b; int ab, ba, mab, mba; };
+static std::vector<TTVs> g_vs;
+
+static TTVs *TT_VsFind(int ra, int rb, bool create)
+{
+	int a = ra < rb ? ra : rb, b = ra < rb ? rb : ra;
+	for (size_t i = 0; i < g_vs.size(); i++)
+		if (g_vs[i].a == a && g_vs[i].b == b)
+			return &g_vs[i];
+	if (!create)
+		return NULL;
+	TTVs v;
+	memset(&v, 0, sizeof(v));
+	v.a = a;
+	v.b = b;
+	g_vs.push_back(v);
+	return &g_vs.back();
+}
 
 // Per player slot, this map.
 struct TTSession
@@ -292,6 +322,8 @@ struct TTSession
 	float   consumedTake;    // dmg_take already counted at a kill, this frame
 	bool    ratedThisMap;
 	int     forceCls;        // > 0: count the next numbers for this class (a sentry kill is the engineer's)
+	int     streak;          // enemy kills since they last died
+	float   hpSnap;          // health at the start of this frame (how much a heal gave)
 };
 static TTSession g_ss[TT_MAX_PLAYERS + 1];
 
@@ -324,12 +356,14 @@ void TT_StatsConfigDefaults(void)
 	g_st.wCap           = 5.0f;
 	g_st.wPickup        = 1.0f;
 	g_st.wTeamkill      = -2.0f;
+	g_st.wHeal          = 0.0f;     // per 100 health healed
 	g_st.newRating      = 0.0f; // 0 = median of everyone known
 	g_st.window         = 1;    // MOTD window (2 = paged menu)
 	g_st.menuTime       = 60.0f;
 	strcpy(g_st.capWord, "cap");
 	strcpy(g_st.returnWord, "return");
 	g_st.debugCaps      = 1;    // on while caps are being worked out on real maps
+	g_st.rivals         = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -373,16 +407,19 @@ static void TT_StatsLoad(void)
 	}
 	char line[1024];
 	int cur = -1, bad = 0;
+	g_vs.clear();
+	struct TTVsLine { char a[48], b[48]; int ab, ba; };
+	std::vector<TTVsLine> vsLines;
 	bool v1 = false; // v1 files carry the old trace-based headshots - dropped below
 	while (fgets(line, sizeof(line), f))
 	{
 		if (!strncmp(line, "# TFC Teams player stats v1", 27))
 			v1 = true;
 		line[strcspn(line, "\r\n")] = 0;
-		char *fld[24];
+		char *fld[32];
 		int n = 0;
 		char *p = line;
-		while (n < 24)
+		while (n < 32)
 		{
 			fld[n++] = p;
 			char *t = strchr(p, '\t');
@@ -412,6 +449,11 @@ static void TT_StatsLoad(void)
 			{
 				b.builds = atoi(fld[20]);
 				b.buildKills = atoi(fld[21]);
+			}
+			if (n >= 26)
+			{
+				b.heals = atoi(fld[22]); b.cures = atoi(fld[23]);
+				b.healed = (float)atof(fld[24]); b.bestStreak = atoi(fld[25]);
 			}
 			if (!r.key[0] || TT_FindRecord(r.key) >= 0)
 			{
@@ -443,6 +485,11 @@ static void TT_StatsLoad(void)
 			b.carrierKills = atoi(fld[9]); b.carrierDeaths = atoi(fld[10]);
 			b.shots = atoi(fld[11]); b.hits = atoi(fld[12]); b.headshots = atoi(fld[13]);
 			b.damage = (float)atof(fld[14]); b.builds = atoi(fld[15]); b.buildKills = atoi(fld[16]);
+			if (n >= 21)
+			{
+				b.heals = atoi(fld[17]); b.cures = atoi(fld[18]);
+				b.healed = (float)atof(fld[19]); b.bestStreak = atoi(fld[20]);
+			}
 		}
 		else if (n >= 9 && !strcmp(fld[0], "CW") && cur >= 0)
 		{
@@ -454,10 +501,30 @@ static void TT_StatsLoad(void)
 			s.kills = atoi(fld[3]); s.deaths = atoi(fld[4]); s.shots = atoi(fld[5]);
 			s.hits = atoi(fld[6]); s.headshots = atoi(fld[7]); s.damage = (float)atof(fld[8]);
 		}
+		else if (n >= 5 && !strcmp(fld[0], "V"))
+		{
+			TTVsLine v;
+			memset(&v, 0, sizeof(v));
+			strncpy(v.a, fld[1], sizeof(v.a) - 1);
+			strncpy(v.b, fld[2], sizeof(v.b) - 1);
+			v.ab = atoi(fld[3]);
+			v.ba = atoi(fld[4]);
+			vsLines.push_back(v);
+		}
 		else if (line[0] && line[0] != '#' && strcmp(fld[0], "W"))
 			bad++;
 	}
 	fclose(f);
+	for (size_t i = 0; i < vsLines.size(); i++)
+	{
+		int ra = TT_FindRecord(vsLines[i].a), rb = TT_FindRecord(vsLines[i].b);
+		if (ra < 0 || rb < 0 || ra == rb)
+			continue;
+		TTVs *v = TT_VsFind(ra, rb, true);
+		// stored as "a killed b" for the file's order
+		if (v->a == ra) { v->ab += vsLines[i].ab; v->ba += vsLines[i].ba; }
+		else            { v->ab += vsLines[i].ba; v->ba += vsLines[i].ab; }
+	}
 	if (v1)
 	{
 		for (size_t i = 0; i < g_db.size(); i++)
@@ -485,10 +552,11 @@ static void TT_StatsSave(const char *why)
 		TT_Trace("Stats: could not write %s", tmp);
 		return;
 	}
-	fprintf(f, "# TFC Teams player stats v3 - P key name bot rating maps lastseen seconds kills deaths suicides teamkills caps pickups carrierkills carrierdeaths shots hits headshots damage builds buildkills\n");
+	fprintf(f, "# TFC Teams player stats v4 - P key name bot rating maps lastseen seconds kills deaths suicides teamkills caps pickups carrierkills carrierdeaths shots hits headshots damage builds buildkills heals cures healed beststreak\n");
 	fprintf(f, "#                           W weapon kills deaths shots hits headshots damage\n");
-	fprintf(f, "#                           C class seconds kills deaths suicides teamkills caps pickups carrierkills carrierdeaths shots hits headshots damage builds buildkills\n");
+	fprintf(f, "#                           C class seconds kills deaths suicides teamkills caps pickups carrierkills carrierdeaths shots hits headshots damage builds buildkills heals cures healed beststreak\n");
 	fprintf(f, "#                           CW class weapon kills deaths shots hits headshots damage\n");
+	fprintf(f, "#                           V key1 key2 key1_killed_key2 key2_killed_key1 (at the end)\n");
 	int written = 0;
 	for (size_t i = 0; i < g_db.size(); i++)
 	{
@@ -499,10 +567,11 @@ static void TT_StatsSave(const char *why)
 		written++;
 		Clean(r.name);
 		const TTBlock &b = r.life;
-		fprintf(f, "P\t%s\t%s\t%d\t%.3f\t%d\t%ld\t%.0f\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%.0f\t%d\t%d\n",
+		fprintf(f, "P\t%s\t%s\t%d\t%.3f\t%d\t%ld\t%.0f\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%.0f\t%d\t%d\t%d\t%d\t%.0f\t%d\n",
 			r.key, r.name, r.bot ? 1 : 0, r.rating, r.maps, r.lastSeen, b.seconds,
 			b.kills, b.deaths, b.suicides, b.teamkills, b.caps, b.pickups, b.carrierKills,
-			b.carrierDeaths, b.shots, b.hits, b.headshots, b.damage, b.builds, b.buildKills);
+			b.carrierDeaths, b.shots, b.hits, b.headshots, b.damage, b.builds, b.buildKills,
+			b.heals, b.cures, b.healed, b.bestStreak);
 		for (int w = 0; w < W_COUNT; w++)
 		{
 			const TTWeaponStat &s = b.w[w];
@@ -515,9 +584,10 @@ static void TT_StatsSave(const char *why)
 			const TTCounts &k = b.cls[c];
 			if (!CountsUsed(k))
 				continue;
-			fprintf(f, "C\t%s\t%.0f\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%.0f\t%d\t%d\n",
+			fprintf(f, "C\t%s\t%.0f\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%.0f\t%d\t%d\t%d\t%d\t%.0f\t%d\n",
 				g_clsKey[c], k.seconds, k.kills, k.deaths, k.suicides, k.teamkills, k.caps, k.pickups,
-				k.carrierKills, k.carrierDeaths, k.shots, k.hits, k.headshots, k.damage, k.builds, k.buildKills);
+				k.carrierKills, k.carrierDeaths, k.shots, k.hits, k.headshots, k.damage, k.builds, k.buildKills,
+				k.heals, k.cures, k.healed, k.bestStreak);
 			for (int w = 0; w < W_COUNT; w++)
 			{
 				const TTWeaponStat &s = k.w[w];
@@ -526,6 +596,13 @@ static void TT_StatsSave(const char *why)
 						s.kills, s.deaths, s.shots, s.hits, s.headshots, s.damage);
 			}
 		}
+	}
+	for (size_t i = 0; i < g_vs.size(); i++)
+	{
+		const TTVs &v = g_vs[i];
+		if (v.ab + v.ba <= 0 || v.a < 0 || v.b < 0 || v.a >= (int)g_db.size() || v.b >= (int)g_db.size())
+			continue;
+		fprintf(f, "V\t%s\t%s\t%d\t%d\n", g_db[v.a].key, g_db[v.b].key, v.ab, v.ba);
 	}
 	fclose(f);
 	remove(path);
@@ -618,7 +695,7 @@ static void TT_Flush(int idx)
 static float TT_Points(const TTCounts &b)
 {
 	return b.kills * g_st.wKill + b.carrierKills * g_st.wCarrierKill + b.caps * g_st.wCap
-		+ b.pickups * g_st.wPickup + b.teamkills * g_st.wTeamkill;
+		+ b.pickups * g_st.wPickup + b.teamkills * g_st.wTeamkill + b.healed * g_st.wHeal / 100.0f;
 }
 
 // Points per 10 minutes on a team.
@@ -682,6 +759,24 @@ static int TT_EvClass(int idx, int w)
 	s_.map.w[wi].field += (n); s_.pending.w[wi].field += (n); \
 	s_.map.cls[c_].w[wi].field += (n); s_.pending.cls[c_].w[wi].field += (n); } while (0)
 
+// A kill streak: the best so far this map, since the last save, and for the class.
+static void TT_StreakNote(int idx)
+{
+	TTSession &s = g_ss[idx];
+	int c = TT_EvClass(idx, -1);
+	TTCounts *t[4] = { &s.map, &s.pending, &s.map.cls[c], &s.pending.cls[c] };
+	for (int j = 0; j < 4; j++)
+		if (s.streak > t[j]->bestStreak)
+			t[j]->bestStreak = s.streak;
+}
+
+// Kills with a melee weapon: crowbar/umbrella, spanner, knife, and the medikit
+// itself (not its infection).
+static int TT_MeleeKills(const TTCounts &b)
+{
+	return b.w[W_AXE].kills + b.w[W_SPANNER].kills + b.w[W_KNIFE].kills + b.w[W_MEDIKIT].kills;
+}
+
 static int TT_IdxOf(const edict_t *e)
 {
 	if (!e)
@@ -721,6 +816,8 @@ void TT_StatsMapStart(void)
 		g_ss[i].rec = rec;
 	}
 	memset(g_eventW, 0, sizeof(g_eventW)); // refilled as this map precaches
+	for (size_t i = 0; i < g_vs.size(); i++)
+		g_vs[i].mab = g_vs[i].mba = 0;
 	for (int i = 0; i < TT_MAX_EDICTS; i++)
 		g_note[i].serial = -1;
 	g_intermission = g_summaryDone = g_mapEnded = false;
@@ -1222,6 +1319,7 @@ void TT_StatsLogLine(const char *line)
 		edict_t *ve = INDEXENT(victim);
 		TT_BUMP(victim, deaths, 1);
 		TT_BUMPW(victim, w, deaths, 1);
+		g_ss[victim].streak = 0;
 		if (killer && killer != victim)
 		{
 			if (w == W_SENTRY || w == W_DISPENSER)
@@ -1233,6 +1331,17 @@ void TT_StatsLogLine(const char *line)
 			{
 				TT_BUMP(killer, kills, 1);
 				TT_BUMPW(killer, w, kills, 1);
+				g_ss[killer].streak++;
+				TT_StreakNote(killer);
+				if (g_st.rivals && g_ss[killer].rec >= 0 && g_ss[victim].rec >= 0
+					&& g_ss[killer].rec != g_ss[victim].rec
+					&& (!g_db[g_ss[killer].rec].bot || !g_db[g_ss[victim].rec].bot))
+				{
+					int rk = g_ss[killer].rec, rv = g_ss[victim].rec;
+					TTVs *v = TT_VsFind(rk, rv, true);
+					if (v->a == rk) { v->ab++; v->mab++; }
+					else            { v->ba++; v->mba++; }
+				}
 				if (carrier)
 				{
 					TT_BUMP(killer, carrierKills, 1);
@@ -1254,6 +1363,7 @@ void TT_StatsLogLine(const char *line)
 			return; // our own team change, not their doing
 		TT_BUMP(who, suicides, 1);
 		TT_BUMP(who, deaths, 1);
+		g_ss[who].streak = 0;
 		return;
 	}
 
@@ -1263,6 +1373,36 @@ void TT_StatsLogLine(const char *line)
 	// (with no "against", the engineer blew up or lost their own - not counted).
 	{
 		const char *bt = strstr(line, "\" triggered \"");
+		// Medic (CTFMedikit::AxeHit, tfc.so 0x125830):
+		//   "A" triggered "Medic_Heal" against "B"  - only logged when B was below
+		//     max health (healed to max) or within 50 over it (+5, the overheal)
+		//   "A" triggered "Medic_Cured_Concussion" / "_Hallucinations" /
+		//     "_Tranquilisation" / "_Infection" / "Medic_Doused_Fire" against "B"
+		// The log line has no amount: it is B's health now minus at the start of
+		// the frame.
+		if (bt && (!strncmp(bt + 13, "Medic_Heal\" against \"", 21)
+			|| !strncmp(bt + 13, "Medic_Cured_", 12) || !strncmp(bt + 13, "Medic_Doused_Fire\"", 18)))
+		{
+			int who = TT_ParsePlayerRef(line, bt - 1);
+			const char *ag = strstr(bt + 13, "\" against \"");
+			const char *lastQ = strrchr(line, '"');
+			int to = (ag && lastQ > ag + 11) ? TT_ParsePlayerRef(ag + 11, lastQ - 1) : 0;
+			if (who && to && who != to)
+			{
+				if (bt[19] == 'H') // Medic_Heal
+				{
+					TT_BUMP(who, heals, 1);
+					edict_t *te = INDEXENT(to);
+					float gave = te->v.health - g_ss[to].hpSnap;
+					if (gave > 0 && gave <= 300.0f)
+						TT_BUMP(who, healed, gave);
+					g_ss[to].hpSnap = te->v.health;
+				}
+				else
+					TT_BUMP(who, cures, 1);
+			}
+			return;
+		}
 		if (bt && (!strncmp(bt + 13, "Built_Dispenser\"", 16) || !strncmp(bt + 13, "Sentry_Built_Level_1\"", 21)))
 		{
 			int who = TT_ParsePlayerRef(line, bt - 1);
@@ -1389,6 +1529,7 @@ void TT_StatsFrame(void)
 		TTSession &s = g_ss[i];
 		if (s.rec < 0)
 			TT_Resolve(i, e);
+		s.hpSnap = e->v.health;
 		int team = TT_PlayerTeam(e);
 		if (team && !g_intermission)
 			TT_BUMP(i, seconds, dt);
@@ -1757,7 +1898,11 @@ static void TT_StatsPage(edict_t *to, TTMenu &m)
 		t.add("\\yOverview\\w  \\d(this map / lifetime)\\w\n");
 		t.add("Rating %.1f - %s\n", TT_ViewRating(v), rank);
 		t.add("Kills %d / %d   Deaths %d / %d\n", mp.kills, lf.kills, mp.deaths, lf.deaths);
-		t.add("K/D %.2f / %.2f\n", TT_KD(mp.kills, mp.deaths), TT_KD(lf.kills, lf.deaths));
+		t.add("K/D %.2f / %.2f   Best streak %d / %d\n", TT_KD(mp.kills, mp.deaths), TT_KD(lf.kills, lf.deaths),
+			mp.bestStreak, lf.bestStreak);
+		t.add("Melee kills %d / %d\n", TT_MeleeKills(mp), TT_MeleeKills(lf));
+		if (lf.heals || lf.cures)
+			t.add("Healed %.0f / %.0f   Cures %d / %d\n", mp.healed, lf.healed, mp.cures, lf.cures);
 		t.add("Caps %d / %d   Pickups %d / %d\n", mp.caps, lf.caps, mp.pickups, lf.pickups);
 		t.add("Carrier kills %d / %d\n", mp.carrierKills, lf.carrierKills);
 		t.add("Accuracy %d%% / %d%%   Headshots %d / %d\n", TT_Acc(mp.hits, mp.shots),
@@ -1778,6 +1923,10 @@ static void TT_StatsPage(edict_t *to, TTMenu &m)
 		TT_TimeText(cl.seconds, b, sizeof(b));
 		t.add("Time %s / %s   %.1f points per 10 min\n", a, b, TT_Perf(cl));
 		t.add("Kills %d / %d   Deaths %d / %d\n", cm.kills, cl.kills, cm.deaths, cl.deaths);
+		t.add("Best streak %d / %d   Melee kills %d / %d\n", cm.bestStreak, cl.bestStreak,
+			TT_MeleeKills(cm), TT_MeleeKills(cl));
+		if (cl.heals || cl.cures)
+			t.add("Healed %.0f / %.0f   Cures %d / %d\n", cm.healed, cl.healed, cm.cures, cl.cures);
 		if (cl.caps || cl.carrierKills || cl.pickups)
 			t.add("Caps %d / %d   Carrier kills %d / %d\n", cm.caps, cl.caps, cm.carrierKills, cl.carrierKills);
 		t.add("Accuracy %d%% / %d%%   Damage %.0f / %.0f\n", TT_Acc(cm.hits, cm.shots), TT_Acc(cl.hits, cl.shots),
@@ -1972,6 +2121,14 @@ static void TT_ShowStatsWindow(edict_t *to, edict_t *who, int cls)
 	t.add("Kills:  %d  /  %d\n", m.kills, l.kills);
 	t.add("Deaths:  %d  /  %d\n", m.deaths, l.deaths);
 	t.add("Kills per death:  %.2f  /  %.2f\n", TT_KD(m.kills, m.deaths), TT_KD(l.kills, l.deaths));
+	t.add("Best kill streak:  %d  /  %d\n", m.bestStreak, l.bestStreak);
+	if (cls < 1 || TT_MeleeKills(l))
+		t.add("Melee kills:  %d  /  %d\n", TT_MeleeKills(m), TT_MeleeKills(l));
+	if (l.heals || l.cures)
+	{
+		t.add("Health given to team-mates:  %.0f  /  %.0f\n", m.healed, l.healed);
+		t.add("Heals / cures:  %d / %d  -  %d / %d\n", m.heals, m.cures, l.heals, l.cures);
+	}
 	if (cls < 1 || l.caps || l.pickups || l.carrierKills)
 	{
 		t.add("Flag captures:  %d  /  %d\n", m.caps, l.caps);
@@ -2098,7 +2255,77 @@ static void TT_ShowTopWindow(edict_t *to, bool rankOnly)
 }
 
 // The last map's awards, for !awards (and the window at intermission).
-static char g_awards[1100];
+static char g_awards[1536];
+static char g_awardsShort[1536];   // without the best of each class, for when the full one won't fit
+
+// !rival: the player who has killed you most, the one you have killed most,
+// and your most even opponent (lifetime, this map included).
+static void TT_RivalText(edict_t *to, edict_t *who)
+{
+	int idx = ENTINDEX(who);
+	int rec = (idx >= 1 && idx <= TT_MAX_PLAYERS) ? g_ss[idx].rec : -1;
+	const char *name = STRING(who->v.netname);
+	if (!g_st.rivals)
+	{
+		TT_Say(to, "%s Head-to-head tracking is off on this server.", TT_TAG);
+		return;
+	}
+	if (rec < 0)
+	{
+		TT_Say(to, "%s No stats for %s yet.", TT_TAG, name);
+		return;
+	}
+	int nem = -1, nemThey = 0, nemMe = 0;
+	int prey = -1, preyMe = 0, preyThey = 0;
+	int even = -1, evenMe = 0, evenThey = 0;
+	float evenScore = 1e9f;
+	for (size_t i = 0; i < g_vs.size(); i++)
+	{
+		const TTVs &v = g_vs[i];
+		if (v.a != rec && v.b != rec)
+			continue;
+		bool amA = v.a == rec;
+		int other = amA ? v.b : v.a;
+		int me = amA ? v.ab : v.ba, they = amA ? v.ba : v.ab;
+		if (they > 0 && (they > nemThey || (they == nemThey && me < nemMe)))
+		{ nem = other; nemThey = they; nemMe = me; }
+		if (me > 0 && (me > preyMe || (me == preyMe && they < preyThey)))
+		{ prey = other; preyMe = me; preyThey = they; }
+		int total = me + they;
+		if (total >= 6)
+		{
+			// Closest to even, then most played.
+			float sc = (float)abs(me - they) / (float)total - total * 0.0001f;
+			if (sc < evenScore) { evenScore = sc; even = other; evenMe = me; evenThey = they; }
+		}
+	}
+	if (nem < 0 && prey < 0)
+	{
+		TT_Say(to, "%s No head-to-head for %s yet.", TT_TAG, name);
+		return;
+	}
+	bool self = who == to;
+	char whose[48], you[40], them[8];
+	_snprintf_wc(whose, sizeof(whose) - 1, self ? "Your" : "%s's", name);
+	whose[sizeof(whose) - 1] = 0;
+	_snprintf_wc(you, sizeof(you) - 1, "%s", self ? "you" : name);
+	you[sizeof(you) - 1] = 0;
+	strcpy(them, "them");
+	if (nem >= 0)
+		TT_Say(to, "%s %s nemesis: %s - killed %s %d time%s, %s got %s %d", TT_TAG, whose, g_db[nem].name,
+			you, nemThey, nemThey == 1 ? "" : "s", you, them, nemMe);
+	if (prey >= 0 && prey != nem)
+		TT_Say(to, "%s %s favourite target: %s - %s killed %s %d time%s, %s got %s %d", TT_TAG, whose,
+			g_db[prey].name, you, them, preyMe, preyMe == 1 ? "" : "s", them, self ? "you" : name, preyThey);
+	if (even >= 0 && even != nem && even != prey)
+	{
+		if (evenMe == evenThey)
+			TT_Say(to, "%s %s even match: %s - %d kills each way", TT_TAG, whose, g_db[even].name, evenMe);
+		else
+			TT_Say(to, "%s %s closest match: %s - %s %d, %s %d", TT_TAG, whose, g_db[even].name,
+				self ? "you" : name, evenMe, them, evenThey);
+	}
+}
 
 bool TT_StatsChat(edict_t *p, const char *word, const char *rest)
 {
@@ -2192,6 +2419,21 @@ bool TT_StatsChat(edict_t *p, const char *word, const char *rest)
 			TT_ShowTopWindow(p, false);
 		return true;
 	}
+	if (!strcasecmp(w, "rival") || !strcasecmp(w, "rivals") || !strcasecmp(w, "nemesis"))
+	{
+		edict_t *who = p;
+		if (rest && rest[0])
+		{
+			who = TT_FindByName(rest);
+			if (!who)
+			{
+				TT_Say(p, "%s No single player matches \"%s\".", TT_TAG, rest);
+				return true;
+			}
+		}
+		TT_RivalText(p, who);
+		return true;
+	}
 	if (!strcasecmp(w, "awards"))
 	{
 		if (g_awards[0])
@@ -2209,11 +2451,39 @@ bool TT_StatsChat(edict_t *p, const char *word, const char *rest)
 // client.so 0x8a370, lets menu 5 through when it refuses the others): the
 // map's awards, the best player of each class, and their own map. Plus a line
 // across the top of the screen and the awards in chat.
+// The pair with the most kills both ways this map (each at least 2 on the other).
+static bool TT_MapRivalry(int *ra, int *rb, int *ab, int *ba)
+{
+	int best = -1, bestTotal = 0;
+	for (size_t i = 0; i < g_vs.size(); i++)
+	{
+		const TTVs &v = g_vs[i];
+		if (v.mab < 2 || v.mba < 2)
+			continue;
+		int t = v.mab + v.mba;
+		if (t > bestTotal) { bestTotal = t; best = (int)i; }
+	}
+	if (best < 0)
+		return false;
+	const TTVs &v = g_vs[(size_t)best];
+	// The one with more kills first.
+	if (v.mab >= v.mba) { *ra = v.a; *rb = v.b; *ab = v.mab; *ba = v.mba; }
+	else                { *ra = v.b; *rb = v.a; *ab = v.mba; *ba = v.mab; }
+	return true;
+}
+
+struct TTFeedSort { int idx; float pts; };
+static int TT_FeedSortCmp(const void *a, const void *b)
+{
+	const TTFeedSort *x = (const TTFeedSort *)a, *y = (const TTFeedSort *)b;
+	if (x->pts != y->pts)
+		return x->pts > y->pts ? -1 : 1;
+	return x->idx - y->idx;
+}
+
 static void TT_Summary(void)
 {
-	if (!g_st.summary)
-		return;
-	enum { A_MVP, A_KILLS, A_CAPS, A_CARRIER, A_ACC, A_HS, A_DMG, A_BUILD, A_N };
+	enum { A_MVP, A_KILLS, A_STREAK, A_CAPS, A_CARRIER, A_ACC, A_HS, A_DMG, A_MELEE, A_HEAL, A_BUILD, A_N };
 	int best[A_N];
 	float val[A_N];
 	for (int k = 0; k < A_N; k++)
@@ -2246,6 +2516,11 @@ static void TT_Summary(void)
 		if (m.headshots > val[A_HS]) { best[A_HS] = i; val[A_HS] = (float)m.headshots; }
 		if (m.damage > val[A_DMG]) { best[A_DMG] = i; val[A_DMG] = m.damage; }
 		if (m.buildKills > val[A_BUILD]) { best[A_BUILD] = i; val[A_BUILD] = (float)m.buildKills; }
+		// A streak of 1 is no streak.
+		if (m.bestStreak >= 2 && m.bestStreak > val[A_STREAK]) { best[A_STREAK] = i; val[A_STREAK] = (float)m.bestStreak; }
+		int melee = TT_MeleeKills(m);
+		if (melee > val[A_MELEE]) { best[A_MELEE] = i; val[A_MELEE] = (float)melee; }
+		if (m.healed >= 1.0f && m.healed > val[A_HEAL]) { best[A_HEAL] = i; val[A_HEAL] = m.healed; }
 		for (int c = 1; c < TT_CLASSES; c++)
 		{
 			const TTCounts &k = m.cls[c];
@@ -2253,11 +2528,68 @@ static void TT_Summary(void)
 			if (k.seconds >= 60.0f && pts >= 1.0f && pts > valCls[c]) { bestCls[c] = i; valCls[c] = pts; }
 		}
 	}
-	if (!best[A_MVP])
+	static const char *title[A_N] = { "MVP", "Most kills", "Longest kill streak", "Most caps",
+		"Most flag carrier kills", "Best accuracy", "Most headshots", "Most damage", "Most melee kills",
+		"Most healing", "Most enemy buildings destroyed" };
+	static const char *unit[A_N] = { " points", "", " in a row", "", "", "%", "", "", "", " health", "" };
+	int rvA = -1, rvB = -1, rvAB = 0, rvBA = 0;
+	bool rivalry = g_st.rivals && TT_MapRivalry(&rvA, &rvB, &rvAB, &rvBA);
+
+	// Discord (tt_feed.cpp) - whatever stats_summary is set to.
+	{
+		static TTFeedMapEnd fm;
+		memset(&fm, 0, sizeof(fm));
+		strncpy(fm.map, STRING(gpGlobals->mapname), sizeof(fm.map) - 1);
+		for (int t = 1; t <= TT_MAX_TEAMS; t++)
+			fm.teamScore[t] = (int)g_teamScore[t];
+		for (int k = 0; k < A_N && fm.awardCount < 16; k++)
+			if (best[k])
+			{
+				TTFeedAward &a = fm.awards[fm.awardCount++];
+				strncpy(a.title, title[k], sizeof(a.title) - 1);
+				strncpy(a.name, STRING(INDEXENT(best[k])->v.netname), sizeof(a.name) - 1);
+				a.value = val[k];
+				strncpy(a.unit, unit[k], sizeof(a.unit) - 1);
+			}
+		if (rivalry)
+		{
+			strncpy(fm.rivalA, g_db[rvA].name, sizeof(fm.rivalA) - 1);
+			strncpy(fm.rivalB, g_db[rvB].name, sizeof(fm.rivalB) - 1);
+			fm.rivalAB = rvAB;
+			fm.rivalBA = rvBA;
+		}
+		TTFeedSort order[TT_MAX_PLAYERS];
+		int no = 0;
+		for (int i = 1; i <= gpGlobals->maxClients && i <= TT_MAX_PLAYERS; i++)
+		{
+			edict_t *e = TT_Player(i);
+			if (!e || TT_IsHLTV(e) || g_ss[i].map.seconds < 60.0f)
+				continue;
+			order[no].idx = i;
+			order[no].pts = TT_Points(g_ss[i].map);
+			no++;
+		}
+		qsort(order, (size_t)no, sizeof(order[0]), TT_FeedSortCmp);
+		for (int j = 0; j < no && fm.playerCount < 32; j++)
+		{
+			int i = order[j].idx;
+			edict_t *e = INDEXENT(i);
+			TTFeedPlayer &fp = fm.players[fm.playerCount++];
+			strncpy(fp.name, STRING(e->v.netname), sizeof(fp.name) - 1);
+			if (g_ss[i].rec >= 0)
+				strncpy(fp.key, g_db[g_ss[i].rec].key, sizeof(fp.key) - 1);
+			fp.bot = TT_IsBot(e);
+			fp.team = TT_PlayerTeam(e);
+			fp.kills = g_ss[i].map.kills;
+			fp.deaths = g_ss[i].map.deaths;
+			fp.caps = g_ss[i].map.caps;
+			fp.points = order[j].pts;
+		}
+		TT_FeedMapEnd(fm);
+	}
+
+	if (!g_st.summary || !best[A_MVP])
 		return;
-	static const char *title[A_N] = { "MVP", "Most kills", "Most caps", "Most flag carrier kills",
-		"Best accuracy", "Most headshots", "Most damage", "Most enemy buildings destroyed" };
-	static const char *unit[A_N] = { " points", "", "", "", "%", "", "", "" };
 	#define TT_AWNAME(k) STRING(INDEXENT(best[k])->v.netname)
 
 	// Chat and the top of the screen.
@@ -2271,23 +2603,31 @@ static void TT_Summary(void)
 	TT_HudText(NULL, 3, -1.0f, 0.02f, 255, 200, 40, 15.0f, banner);
 
 	// The shared part of the window.
-	TTText t;
-	t.add("MAP AWARDS  -  %s\n\n", STRING(gpGlobals->mapname));
+	// TFC's window takes about 1500 characters, so with long names, every award
+	// and every class played, the per-person window drops the class list.
+	TTText head, cls, riv;
+	head.add("MAP AWARDS  -  %s\n\n", STRING(gpGlobals->mapname));
 	for (int k = 0; k < A_N; k++)
 		if (best[k])
-			t.add("%s:  %s  (%.0f%s)\n", title[k], TT_AWNAME(k), val[k], unit[k]);
-	bool anyCls = false;
+			head.add("%s:  %s  (%.0f%s)\n", title[k], TT_AWNAME(k), val[k], unit[k]);
 	for (int c = 1; c < TT_CLASSES; c++)
 		if (bestCls[c])
 		{
-			if (!anyCls)
-				t.add("\nBEST OF EACH CLASS\n");
-			anyCls = true;
-			t.add("%s:  %s  (%.0f points)\n", g_clsTitle[c], STRING(INDEXENT(bestCls[c])->v.netname), valCls[c]);
+			if (!cls.len)
+				cls.add("\nBEST OF EACH CLASS\n");
+			cls.add("%s:  %s  (%.0f points)\n", g_clsTitle[c], STRING(INDEXENT(bestCls[c])->v.netname), valCls[c]);
 		}
 	#undef TT_AWNAME
-	strncpy(g_awards, t.buf, sizeof(g_awards) - 1);
+	if (rivalry)
+	{
+		riv.add("\nRIVALRY OF THE MAP\n%s  %d - %d  %s\n", g_db[rvA].name, rvAB, rvBA, g_db[rvB].name);
+		TT_SayAll("%s Rivalry of the map: %s %d - %d %s", TT_TAG, g_db[rvA].name, rvAB, rvBA, g_db[rvB].name);
+	}
+	_snprintf_wc(g_awards, sizeof(g_awards) - 1, "%s%s%s", head.buf, cls.buf, riv.buf);
 	g_awards[sizeof(g_awards) - 1] = 0;
+	_snprintf_wc(g_awardsShort, sizeof(g_awardsShort) - 1, "%s%s%s", head.buf, riv.buf,
+		cls.len ? "(say !awards for the best of each class)\n" : "");
+	g_awardsShort[sizeof(g_awardsShort) - 1] = 0;
 	if (g_st.summary < 2)
 		return;
 
@@ -2298,7 +2638,6 @@ static void TT_Summary(void)
 		if (!e || TT_IsBot(e) || TT_IsHLTV(e))
 			continue;
 		TTText w;
-		w.add("%s", g_awards);
 		const TTSession &s = g_ss[i];
 		const TTBlock &m = s.map;
 		w.add("\nYOUR MAP\n");
@@ -2308,6 +2647,9 @@ static void TT_Summary(void)
 			w.add("   Headshots %d", m.headshots);
 		if (m.builds || m.buildKills)
 			w.add("   Built %d   Enemy buildings %d", m.builds, m.buildKills);
+		w.add("\nBest streak %d   Melee kills %d", m.bestStreak, TT_MeleeKills(m));
+		if (m.heals || m.cures)
+			w.add("   Healed %.0f health (%d cures)", m.healed, m.cures);
 		w.add("\n");
 		char tm[24];
 		TT_TimeText(m.seconds, tm, sizeof(tm));
@@ -2336,7 +2678,10 @@ static void TT_Summary(void)
 		else
 			w.add("Rating: unchanged (%.0f minutes on a team make a map count)\n", g_st.minMapMinutes);
 		w.add("\nsay !stats for your stats page by page, !top10 for the rankings, !awards to see this again");
-		TT_ShowWindow(e, w.buf);
+		TTText all;
+		all.add("%s", strlen(g_awards) + w.len <= 1490 ? g_awards : g_awardsShort);
+		all.add("%s", w.buf);
+		TT_ShowWindow(e, all.buf);
 	}
 }
 
@@ -2352,4 +2697,29 @@ static void TT_Cmd_StatsSave(void)
 void TT_StatsRegisterCommands(void)
 {
 	REG_SVR_COMMAND("tt_stats_save", TT_Cmd_StatsSave);
+}
+
+// ---------------------------------------------------------------------------
+// For the name tracker and the feed.
+void TT_StatsKeyOf(edict_t *p, char *out, size_t len)
+{
+	TT_KeyFor(p, out, len);
+}
+
+void TT_StatsMapNumbers(int idx, int *kills, int *deaths, int *caps, float *points)
+{
+	*kills = *deaths = *caps = 0;
+	*points = 0;
+	if (idx < 1 || idx > TT_MAX_PLAYERS)
+		return;
+	const TTBlock &m = g_ss[idx].map;
+	*kills = m.kills;
+	*deaths = m.deaths;
+	*caps = m.caps;
+	*points = TT_Points(m);
+}
+
+int TT_StatsTeamScoreOf(int team)
+{
+	return (team >= 1 && team <= TT_MAX_TEAMS) ? (int)g_teamScore[team] : 0;
 }

@@ -17,6 +17,7 @@
 
 #include "tt_common.h"
 #include "tt_stats.h"
+#include "tt_net.h"
 
 TTConfig g_tt;
 
@@ -56,8 +57,16 @@ void TT_ConfigDefaults(void)
 	g_tt.advertFirst         = 270;  // half way between the RTV plugin's tips
 	g_tt.advertJoin          = 40;
 
+	g_tt.balanceBySkill      = 1;
+	g_tt.balancePreferAuto   = 1;
+	g_tt.joinAutoSkill       = 1;
+	g_tt.pickMode            = TT_PICK_RANK;
+	g_tt.pickMixedChance     = 50;
+	g_tt.namesTrack          = 1;
+
 	g_tt.amxxUsers           = 1;
 	TT_StatsConfigDefaults();
+	TT_NetConfigDefaults();
 	g_tt.amxxFlag            = 'j';
 }
 
@@ -145,6 +154,7 @@ static void ApplyKey(const char *key, const char *val, int line)
 	else if (!strcasecmp(key, "stats_points_cap"))       g_st.wCap = fv;
 	else if (!strcasecmp(key, "stats_points_pickup"))    g_st.wPickup = fv;
 	else if (!strcasecmp(key, "stats_points_teamkill"))  g_st.wTeamkill = fv;
+	else if (!strcasecmp(key, "stats_points_heal"))      g_st.wHeal = fv;
 	else if (!strcasecmp(key, "stats_window"))           g_st.window = iv < 0 ? 0 : (iv > 2 ? 2 : iv);
 	else if (!strcasecmp(key, "stats_menu_time"))        g_st.menuTime = ClampF(fv, 0, 600);
 	else if (!strcasecmp(key, "stats_debug_caps"))       g_st.debugCaps = iv ? 1 : 0;
@@ -154,6 +164,24 @@ static void ApplyKey(const char *key, const char *val, int line)
 	else if (!strcasecmp(key, "amxx_users"))             g_tt.amxxUsers = iv ? 1 : 0;
 	else if (!strcasecmp(key, "amxx_flag"))              g_tt.amxxFlag = val[0] ? val[0] : 'j';
 	else if (!strcasecmp(key, "admin"))                  AddAdmin(val, "tfc_teams.ini");
+	else if (!strcasecmp(key, "balance_by_skill"))       g_tt.balanceBySkill = iv ? 1 : 0;
+	else if (!strcasecmp(key, "balance_prefer_auto"))    g_tt.balancePreferAuto = iv ? 1 : 0;
+	else if (!strcasecmp(key, "join_auto_skill"))        g_tt.joinAutoSkill = iv ? 1 : 0;
+	else if (!strcasecmp(key, "pick_mode"))
+	{
+		if (!strcasecmp(val, "rank") || !strcasecmp(val, "skill") || (val[0] == '0' && !val[1]))
+			g_tt.pickMode = TT_PICK_RANK;
+		else if (!strcasecmp(val, "random") || iv == 1)
+			g_tt.pickMode = TT_PICK_RANDOM;
+		else if (!strcasecmp(val, "mixed") || iv == 2)
+			g_tt.pickMode = TT_PICK_MIXED;
+		else
+			TT_Trace("Config: line %d: pick_mode \"%s\" - use rank, random or mixed", line, val);
+	}
+	else if (!strcasecmp(key, "pick_mixed_chance"))      g_tt.pickMixedChance = ClampI(iv, 0, 100);
+	else if (!strcasecmp(key, "names_track"))            g_tt.namesTrack = iv ? 1 : 0;
+	else if (!strcasecmp(key, "stats_rivals"))           g_st.rivals = iv ? 1 : 0;
+	else if (TT_NetConfigKey(key, val))                  ;
 	else
 		TT_Trace("Config: line %d: unknown key \"%s\" ignored", line, key);
 }
@@ -434,6 +462,8 @@ void TT_ConfigLoad(void)
 		g_tt.scrambleMaxWait, g_tt.scrambleIncludeBots,
 		g_tt.scrambleMode == TT_SCR_RESET ? "reset" : "respawn", g_tt.scrambleResetDelay,
 		g_tt.scrambleResetFrags, g_tt.adminCount);
+	TT_Trace("Config (%s): pick_mode=%s mixed_chance=%d%%", map[0] ? map : "?",
+		TT_PickModeName(g_tt.pickMode), g_tt.pickMixedChance);
 }
 
 // STEAM_0:1:2345 and STEAM_1:1:2345 are the same account (the first digit is
@@ -461,4 +491,9 @@ bool TT_IsAdminAuth(const char *authid)
 			return true;
 	}
 	return false;
+}
+
+const char *TT_PickModeName(int mode)
+{
+	return mode == TT_PICK_RANDOM ? "random" : (mode == TT_PICK_MIXED ? "mixed" : "rank");
 }

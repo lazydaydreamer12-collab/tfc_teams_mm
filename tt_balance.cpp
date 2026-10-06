@@ -24,17 +24,43 @@
 // balance_immunity seconds. Nothing happens while a scramble is under way -
 // the scramble is itself rebalancing everybody.
 //
+// SKILL (balance_by_skill 1). "Score" above is then each player's skill
+// rating (tt_stats.cpp: points per 10 minutes, carried across maps) instead of
+// this map's frags, so the move that best evens out the teams' total skill is
+// picked - a team that is up on players AND stacked with the best players
+// gives up one of its best.
+//
+// PICK MODE (pick_mode). "rank" is all of the above. "random" keeps the rules
+// that are not about rank - bots first, auto-assigners first, newest joiners
+// first, a full class last - but in place of the best fit it takes a random
+// player. "mixed" keeps the rank order and rolls a dice for each player on it
+// (pick_mixed_chance %): those who roll out go to the back of the queue, so
+// the best fit is usually but not always the one moved. The rolls are made
+// once per imbalance, not every half second, so the queue does not shuffle
+// itself while waiting for somebody to die.
+//
+// AUTO-ASSIGN FIRST (balance_prefer_auto 1). Someone who joined with Auto
+// Assign ("jointeam 5") said they don't mind which team; they are moved before
+// someone who picked their team. (Bots first is still above that.)
+//
 // JOIN BLOCK. "jointeam N" from a real client is refused when it would put
 // team N balance_threshold or more ahead of the smallest team - exactly the
 // joins that would otherwise trigger a balance straight away. The team menu is
-// reopened so they can pick again. "jointeam 5" (auto-assign) is left to TFC,
-// which already puts people on the smallest team.
+// reopened so they can pick again.
+//
+// AUTO-ASSIGN BY SKILL (join_auto_skill 1). "jointeam 5" is TFC's Auto Assign
+// button (the client sends it; tfc.so ClientCommand 0x69a5b compares the
+// number with 5 and calls TeamFortress_TeamPutPlayerInTeam). TFC would pick
+// the team with the fewest players; we pick among those the one with the
+// lower total skill, and hand the player the game's own "jointeam <n>".
 
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
 #include "tt_common.h"
+#include "tt_stats.h"
+#include "tt_net.h"
 
 static float g_imbalSince = 0;   // 0 = teams are even
 static float g_nextEval = 0;
@@ -47,6 +73,10 @@ static bool  g_announced = false;
 static int   g_rank[TT_MAX_PLAYERS];   // the whole big team, best pick first
 static int   g_rankCount = 0;
 static int   g_forceIdx = 0;           // warned and about to be moved alive (0 = nobody)
+static int   g_episode = 0;            // counts imbalances; pick_mode rolls are made once per one
+static int   g_rollEp[TT_MAX_PLAYERS + 1];
+static float g_rollVal[TT_MAX_PLAYERS + 1];   // random: the player's place in the queue
+static bool  g_rollIn[TT_MAX_PLAYERS + 1];    // mixed: rolled in (keeps their rank place)
 static float g_forceAt = 0;
 
 static void TT_ClearForce(const char *why)
@@ -92,6 +122,33 @@ static bool TT_CarryingGoalItem(edict_t *p)
 		}
 	}
 	return false;
+}
+
+float TT_Strength(edict_t *p)
+{
+	if (FNullEnt(p))
+		return 0;
+	// This map's frags stay in as a tiny tiebreak, so players with the same
+	// rating (everyone new, say) are still told apart by how the map is going.
+	if (g_tt.balanceBySkill && g_st.enabled)
+		return TT_StatsRating(p) + TT_Score(p) * 0.001f;
+	return TT_Score(p);
+}
+
+// Total strength of each team (excludeIdx left out).
+static void TT_TeamStrengths(float str[TT_MAX_TEAMS + 1], int excludeIdx)
+{
+	for (int t = 0; t <= TT_MAX_TEAMS; t++)
+		str[t] = 0;
+	for (int i = 1; i <= gpGlobals->maxClients && i <= TT_MAX_PLAYERS; i++)
+	{
+		if (i == excludeIdx)
+			continue;
+		edict_t *e = TT_Player(i);
+		int t = TT_PlayerTeam(e);
+		if (t >= 1 && t <= TT_MAX_TEAMS)
+			str[t] += TT_Strength(e);
+	}
 }
 
 static bool TT_Eligible(int idx, edict_t *e)
@@ -168,6 +225,7 @@ static void TT_Evaluate(void)
 	if (!g_imbalSince)
 	{
 		g_imbalSince = now;
+		g_episode++;
 		TT_Trace("Balance: uneven - %s %d v %s %d (frags %.0f v %.0f)",
 			TT_TeamName(big), g_counts[big], TT_TeamName(small), g_counts[small],
 			g_scores[big], g_scores[small]);
@@ -178,7 +236,7 @@ static void TT_Evaluate(void)
 	// Rank the big team.
 	TTCand c[TT_MAX_PLAYERS];
 	int n = 0;
-	bool anyBot = false;
+	bool anyBot = false, anyAuto = false;
 	for (int i = 1; i <= gpGlobals->maxClients && i <= TT_MAX_PLAYERS; i++)
 	{
 		edict_t *e = TT_Player(i);
@@ -186,13 +244,17 @@ static void TT_Evaluate(void)
 			continue;
 		if (TT_IsBot(e))
 			anyBot = true;
+		else if (g_pl[i].joinChoiceKnown && g_pl[i].joinedAuto)
+			anyAuto = true;
 		c[n].idx = i;
 		c[n].group = 0;
 		c[n].key = 0;
 		c[n].key2 = 0;
 		n++;
 	}
-	float gap = g_scores[big] - g_scores[small];
+	float str[TT_MAX_TEAMS + 1];
+	TT_TeamStrengths(str, 0);
+	float gap = str[big] - str[small];
 	for (int j = 0; j < n; j++)
 	{
 		edict_t *e = INDEXENT(c[j].idx);
@@ -202,13 +264,29 @@ static void TT_Evaluate(void)
 		// have to pick another one when moved - take them last. (A bot is just
 		// given an open class, so this does not apply to bots.)
 		int cls = (int)e->v.playerclass;
-		int classGroup = (!TT_IsBot(e) && cls >= 1 && cls <= 9 && !TT_ClassAllowed(small, cls, e)) ? 4 : 0;
-		c[j].group = classGroup + botGroup + (isNew ? 0 : 1);
+		int classGroup = (!TT_IsBot(e) && cls >= 1 && cls <= 9 && !TT_ClassAllowed(small, cls, e)) ? 32 : 0;   // above everything, mixed's +16 included
+		// Picked their team themselves, while someone on it used auto-assign.
+		int pickGroup = (g_tt.balancePreferAuto && anyAuto && !TT_IsBot(e)
+			&& !(g_pl[c[j].idx].joinChoiceKnown && g_pl[c[j].idx].joinedAuto)) ? 2 : 0;
+		c[j].group = classGroup + (botGroup ? 4 : 0) + pickGroup + (isNew ? 0 : 1);
 		// New players: newest first (to the second - everybody present at
 		// map start joined "at once"), then best score fit. Everyone else:
 		// best score fit.
-		float fit = (float)fabs(gap - 2.0f * TT_Score(e));
-		c[j].key  = isNew ? -floorf(g_pl[c[j].idx].teamJoinedAt) : fit;
+		float fit = (float)fabs(gap - 2.0f * TT_Strength(e));
+		int idx = c[j].idx;
+		if (g_tt.pickMode != TT_PICK_RANK && g_rollEp[idx] != g_episode)
+		{
+			g_rollEp[idx] = g_episode;
+			g_rollVal[idx] = (float)RANDOM_LONG(0, 1000000);
+			g_rollIn[idx] = RANDOM_LONG(1, 100) <= g_tt.pickMixedChance;
+		}
+		// random: a random place instead of the fit. mixed: the fit, but those
+		// who rolled out queue behind everyone who rolled in.
+		if (g_tt.pickMode == TT_PICK_RANDOM)
+			fit = g_rollVal[idx];
+		else if (g_tt.pickMode == TT_PICK_MIXED && !g_rollIn[idx])
+			c[j].group += 16;
+		c[j].key  = isNew ? -floorf(g_pl[idx].teamJoinedAt) : fit;
 		c[j].key2 = isNew ? fit : 0.0f;
 	}
 	qsort(c, n, sizeof(c[0]), TT_CandCompare);
@@ -229,13 +307,16 @@ static void TT_Evaluate(void)
 		for (int j = 0; j < g_prefCount; j++)
 		{
 			edict_t *e = INDEXENT(g_pref[j]);
-			int w = _snprintf_wc(line + used, sizeof(line) - used - 1, "%s%s(%.0f%s)", j ? ", " : "",
-				STRING(e->v.netname), TT_Score(e), TT_IsBot(e) ? ",bot" : "");
+			int w = _snprintf_wc(line + used, sizeof(line) - used - 1, "%s%s(%.1f%s%s)", j ? ", " : "",
+				STRING(e->v.netname), TT_Strength(e), TT_IsBot(e) ? ",bot" : "",
+				(g_pl[g_pref[j]].joinChoiceKnown && g_pl[g_pref[j]].joinedAuto) ? ",auto" : "");
 			if (w < 0 || (used += (size_t)w) >= sizeof(line) - 1)
 				break;
 		}
 		line[sizeof(line) - 1] = 0;
-		TT_Trace("Balance: preferred to move from %s: %s", TT_TeamName(big), g_prefCount ? line : "(nobody eligible)");
+		TT_Trace("Balance: preferred to move from %s (pick %s, %s %.1f v %.1f): %s", TT_TeamName(big),
+			TT_PickModeName(g_tt.pickMode), g_tt.balanceBySkill && g_st.enabled ? "skill" : "frags", str[big], str[small],
+			g_prefCount ? line : "(nobody eligible)");
 	}
 }
 
@@ -434,5 +515,50 @@ bool TT_JoinTeamBlocked(edict_t *p, int team)
 	// Put the team menu back up. "changeteam" is TFC's own command for that
 	// (ClientCommand -> Menu_Team, which sends VGUIMenu 2).
 	TT_FakeClientCommand(p, "changeteam", NULL);
+	return true;
+}
+
+bool TT_AutoAssign(edict_t *p)
+{
+	if (!g_tt.enabled || !g_tt.joinAutoSkill || g_map.playableCount < 2 || FNullEnt(p) || TT_IsBot(p))
+		return false;
+	if (TT_ScrambleResetting())
+		return false;
+	// pick_mode random: rank has no say - TFC's own Auto Assign (fewest
+	// players). mixed: rank breaks the tie only if the dice says so.
+	if (g_tt.pickMode == TT_PICK_RANDOM
+		|| (g_tt.pickMode == TT_PICK_MIXED && RANDOM_LONG(1, 100) > g_tt.pickMixedChance))
+		return false;
+	int idx = ENTINDEX(p);
+	int counts[TT_MAX_TEAMS + 1];
+	float scores[TT_MAX_TEAMS + 1], str[TT_MAX_TEAMS + 1];
+	TT_TeamCounts(counts, scores, idx, TT_ScrambleActive());
+	TT_TeamStrengths(str, idx);
+	// Fewest players first (TFC's own rule), then the weaker team.
+	int best = 0;
+	for (int k = 0; k < g_map.playableCount; k++)
+	{
+		int t = g_map.playable[k];
+		int lim = TT_TeamLimit(t);
+		if (lim > 0 && counts[t] >= lim)
+			continue;
+		if (!best || counts[t] < counts[best] || (counts[t] == counts[best] && str[t] < str[best]))
+			best = t;
+	}
+	if (!best || best == TT_PlayerTeam(p))
+		return false; // nothing to choose, or already there: TFC answers it
+	char num[4];
+	_snprintf_wc(num, sizeof(num) - 1, "%d", best);
+	num[sizeof(num) - 1] = 0;
+	int before = (int)p->v.team;
+	TT_FakeClientCommand(p, "jointeam", num);
+	if ((int)p->v.team == before && before != best)
+	{
+		TT_Trace("Join: auto-assign of %s to %s refused by TFC - leaving it to TFC", STRING(p->v.netname), TT_TeamName(best));
+		return false;
+	}
+	TT_Trace("Join: %s used auto-assign - put on %s (players %d, %s %.1f)", STRING(p->v.netname), TT_TeamName(best),
+		counts[best], g_tt.balanceBySkill && g_st.enabled ? "skill" : "frags", str[best]);
+	TT_Say(p, "%s Auto-assign put you on %s - it evens out the teams.", TT_TAG, TT_TeamName(best));
 	return true;
 }

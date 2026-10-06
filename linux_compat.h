@@ -6,7 +6,8 @@
 //     strtol) and the scanf family (sscanf, fscanf, ...) into C23 "__isoc23_"
 //     functions that older glibcs do not have - a server with an older glibc
 //     then refuses to load the plugin at all;
-//   - glibc 2.34 moved dladdr into libc with a new version.
+//   - glibc 2.34 moved dladdr (and dlopen/dlsym) into libc with new versions;
+//   - glibc 2.28 gave fcntl a new version.
 // With this the plugin needs nothing newer than GLIBC_2.4.
 #ifndef TFC_TEAMS_LINUX_COMPAT_H
 #define TFC_TEAMS_LINUX_COMPAT_H
@@ -21,5 +22,10 @@ __asm__(".symver __isoc23_scanf,scanf@GLIBC_2.0");
 __asm__(".symver __isoc23_vsscanf,vsscanf@GLIBC_2.0");
 __asm__(".symver __isoc23_vfscanf,vfscanf@GLIBC_2.0");
 __asm__(".symver dladdr,dladdr@GLIBC_2.0");
+// The Discord sender (tt_net.cpp): glibc 2.34 moved dlopen/dlsym into
+// libc with new versions, and 2.28 gave fcntl a new one.
+__asm__(".symver dlopen,dlopen@GLIBC_2.1");
+__asm__(".symver dlsym,dlsym@GLIBC_2.0");
+__asm__(".symver fcntl,fcntl@GLIBC_2.0");
 #endif
 #endif

@@ -74,6 +74,14 @@ struct TTConfig
 	int   blockUnevenJoin;
 	int   adminImmunity;        // admins are never auto-moved or join-blocked
 
+	// Matching players
+	int   balanceBySkill;       // balance and scramble by skill rating (0 = this map's frags)
+	int   balancePreferAuto;    // move players who used auto-assign before those who picked their team
+	int   joinAutoSkill;        // auto-assign puts a player on the team that evens out skill
+	int   pickMode;             // TT_PICK_*: how scrambles and balancing choose who moves
+	int   pickMixedChance;      // mixed: % chance each rank-picked move actually happens
+	int   namesTrack;           // keep tt_names.txt (every name each SteamID has used)
+
 	// Scramble vote
 	int   voteEnabled;
 	float votePercent;
@@ -158,6 +166,8 @@ struct TTPlayer
 	bool  adminKnown;
 	bool  admin;
 	bool  joinTipDone;       // the join tip was sent (or isn't needed)
+	bool  joinedAuto;        // got onto their team with auto-assign (jointeam 5) this map
+	bool  joinChoiceKnown;   // we saw how they joined
 };
 extern TTPlayer g_pl[TT_MAX_PLAYERS + 1];
 
@@ -213,6 +223,24 @@ void TT_BalanceReset(void);
 void TT_BalanceFrame(void);
 // ClientCommand "jointeam N" from a real client. true = we refused it.
 bool TT_JoinTeamBlocked(edict_t *p, int team);
+// "jointeam 5" (Auto Assign) from a real client: true = we placed them ourselves (by skill).
+bool TT_AutoAssign(edict_t *p);
+// How strong a player is, for matching teams: their skill rating (or this
+// map's frags when balance_by_skill is 0).
+float TT_Strength(edict_t *p);
+
+// ---------------------------------------------------------------------------
+// Names and joins - tt_names.cpp
+void TT_NamesInit(void);
+void TT_NamesShutdown(void);
+void TT_NamesMapStart(void);
+void TT_NamesMapEnd(void);
+void TT_NamesFrame(void);
+void TT_NamesDisconnect(edict_t *p);
+void TT_NamesTeamChoice(edict_t *p, bool autoAssign);
+bool TT_NamesChat(edict_t *p, const char *rest);
+void TT_NamesRegisterCommands(void);
+void TT_FeedRegisterCommands(void);
 
 // ---------------------------------------------------------------------------
 // Scramble - tt_scramble.cpp
@@ -223,6 +251,12 @@ bool TT_ChatCommand(edict_t *p, const char *text);  // true = ours
 #define TT_SCR_RESPAWN 0   // each mover switches at their next death
 #define TT_SCR_NOW     1   // movers switch immediately (living ones die)
 #define TT_SCR_RESET   2   // everyone to spectator, then placed on the new teams
+
+// pick_mode: how scrambles and the balancer choose who goes where.
+#define TT_PICK_RANK    0   // by rank (skill, or this map's frags) - the most even teams
+#define TT_PICK_RANDOM  1   // rank ignored: random teams, random balance picks
+#define TT_PICK_MIXED   2   // rank picks the moves, a dice roll decides each one
+const char *TT_PickModeName(int mode);
 void TT_ScrambleStart(int mode, const char *who);
 bool TT_ScrambleResetting(void);
 void TT_ScrambleCancel(const char *who);

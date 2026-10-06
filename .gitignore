@@ -24,3 +24,14 @@ obj_linux/
 # Written by the plugin at runtime
 tt_trace.log
 tt_stats.txt
+tt_names.txt
+# The Discord webhook - never commit these
+tt_secret.dat
+tt_secret.key
+tt_secret_import.txt
+
+# Made by make_release.bat
+release/
+
+# Unpacked from third_party/bearssl-0.6.tar.gz by Makefile.linux
+third_party/bearssl/

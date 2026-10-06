@@ -4,6 +4,28 @@ A metamod-p plugin for Team Fortress Classic. It keeps TFC teams even by moving
 players **only while they are dead**, stops people joining a team that is already ahead,
 and lets players vote to scramble the teams by score.
 
+**What it does** (Windows and Linux servers):
+
+- **Auto-balance** - moves a player from the bigger team when they die; a forced move after a
+  warning if nobody on that team dies; never moves a flag carrier; respects class limits.
+- **`!scramble` vote** - scrambles at respawn, all at once, or as a spectator reset; admins can
+  force or cancel one.
+- **Skill rating** - points per 10 minutes, carried from map to map, used to balance and
+  scramble so the teams are even in skill, not just in numbers.
+- **Pick mode** - `rank` (most even teams), `random`, or `mixed` (rank picks the swaps, a dice
+  roll decides each one).
+- **Auto Assign** - tells Auto Assign from a picked team; Auto Assign users are moved first and
+  are put on the weaker team.
+- **Player stats** - `!stats` (and per class), `!rank`, `!top10`, `!weapons`, `!rival`, and an
+  end-of-map window of awards: MVP, kills, kill streak, caps, carrier kills, accuracy,
+  headshots, damage, melee kills, healing, buildings destroyed, the best of each class and the
+  rivalry of the map.
+- **Name tracker** - every name a SteamID has used, for admins (`!names`).
+- **Discord** - the end-of-map awards posted to a channel; the webhook is stored encrypted.
+- **Per-map settings** and **chat tips**.
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
+
 ## Building from source
 
 The plugin builds against the metamod-p SDK (the `metamod/` and `hlsdk/` folders from
@@ -68,6 +90,8 @@ in the parent folder (the layout under *Building from source*). If it's elsewher
 | `!forcescramble reset` | Admin only. Spectator reset: everyone goes to spectator, then after `scramble_reset_delay` seconds all are placed on the scrambled teams at once, with their classes and frags back. |
 | `!forcescramble respawn` | Admin only. The normal "switch at next respawn" scramble, whatever `scramble_mode` says. |
 | `!cancelscramble` | Admin only. Drops any pending moves and clears the votes. During a reset countdown it places everyone immediately instead (nobody is left in spectator). |
+| `!rival` / `!rival <name>` | Head-to-head: your nemesis (who has killed you most), your favourite target, and your most even opponent. |
+| `!names <name>` | Admin only. Every name that player has used (also `!names #<userid>` or `!names <SteamID>`, and part of an old name finds people who are not on). The line is hidden from chat. |
 
 Admins are `admin STEAM_…` lines in the ini, plus AMX Mod X `users.ini` SteamID entries
 that have the `amxx_flag` access flag (`j` by default).
@@ -93,7 +117,110 @@ The RTV plugin's tips start at 120 s with the same interval, so the two alternat
 
 `tt_status` · `tt_scramble [now|reset|respawn]` · `tt_cancel` · `tt_reload` · `tt_move <name|#userid> <1-4|team name>`
 
+`tt_names <name|#userid|SteamID>` · `tt_discord <id> <token>|off` · `tt_net` · `tt_net_test`
+
 `tt_move` moves one player immediately. It is handy for testing on your own with bots.
+
+## Matching players
+
+The rating from *Player stats* (points per 10 minutes on a team, carried from map to map) is each
+player's **skill**. With `balance_by_skill 1` (the default):
+
+- **Balancing** moves the player who brings the two teams' total skill closest together, not just
+  this map's frags. A team that is up on players *and* has the best players gives up one of its best.
+- **Scrambles** (respawn and now, as well as reset) deal players out by skill.
+- **New players** start at the median rating, so they count as average until they have played.
+  This map's frags break ties between equal ratings.
+
+**Rank, random or mixed** (`pick_mode`, for scrambles and balancing alike - it can differ per
+map like any setting):
+
+| `pick_mode` | Scrambles | Balancing | Auto Assign |
+|---|---|---|---|
+| `rank` (default) | Dealt by rank: the most even teams | Moves the best fit | Fewest players, then the weaker team |
+| `random` | Random teams (sizes still even) | A random player from the big team | TFC's own: fewest players |
+| `mixed` | The rank deal picks who *should* swap; each swap then rolls `pick_mixed_chance` % (default 50) to happen | Rank order, but each player rolls; those who roll out go to the back of the queue | Rank breaks the tie only if the roll says so |
+
+Rank means skill with `balance_by_skill 1`, this map's frags with 0. In every mode the balancer
+still moves bots first, Auto Assign users before people who picked their team, and newest joiners
+first, and never moves someone onto a team where their class is full when anyone else could go.
+A mixed scramble says in chat how the dice fell ("2 of 3 swaps rolled in"), so one that moves
+fewer people than expected - or nobody - does not look broken. Mixed swaps pair a player going
+one way with a similar-rank player coming back, so a swap that rolls out keeps both where they are
+and the team sizes stay even. `!teams` says which mode the map uses.
+
+**Picking a team or Auto Assign.** The team menu sends `jointeam 1`-`4` for a team and
+`jointeam 5` for the Auto Assign button (read from the TFC client and tfc.so). The plugin
+remembers which each player used:
+
+- `join_auto_skill 1`: Auto Assign puts the player on the team with the fewest players (TFC's own
+  rule) and, between teams with the same number, the one with less total skill. The player is told
+  which team and why.
+- `balance_prefer_auto 1`: when the balancer has to move someone, people who used Auto Assign go
+  before people who picked their team (bots still go first).
+- `!names` shows how often a player picked a team and how often they used Auto Assign.
+
+**Rivals** (`stats_rivals 1`). Every kill is also counted per pair of players (at least one of them
+a person): `!rival` shows your nemesis, your favourite target and your most even opponent, and the
+end-of-map awards show the **rivalry of the map**, the pair with the most kills both ways. It is
+saved in `tt_stats.txt` as `V` lines.
+
+## Name tracker
+
+`tt_names.txt` next to the DLL keeps every name each SteamID has played under: when it was first
+and last seen and how many visits. Admins look people up with `!names` in chat (a window) or
+`tt_names` in the server console. Bots and LAN players (no SteamID) are not tracked.
+`names_track 0` stops recording.
+
+## Discord: end-of-map awards
+
+At the end of every map the plugin posts one message to a Discord channel: the score, the next
+map, the MVP, the awards, the rivalry of the map and the top players. Nothing else is posted.
+Names are escaped, and Discord is told not to turn anything into a ping, so a player called
+`@everyone` stays plain text. The next map comes from AMX Mod X's `amx_nextmap`, which the RTV
+plugin keeps set to the vote's winner; it is left out when unknown.
+
+### Setting up
+
+1. In Discord: channel settings > Integrations > Webhooks > New Webhook > Copy Webhook URL.
+2. Give the plugin the link, one of two ways:
+   - **Server console or rcon:** `tt_discord <id> <token>` - the long number and the long code
+     from the link (`https://discord.com/api/webhooks/<id>/<token>`). The whole link in quotes
+     works too, but **through AMX Mod X's `amx_rcon` use the short form**: `amx_rcon` passes on
+     only 127 characters, which cuts a webhook link off.
+   - **A file:** put the line `discord=https://discord.com/api/webhooks/...` in
+     `tt_secret_import.txt` next to the plugin. It is read at the next map change, stored
+     encrypted, and the file is wiped and deleted.
+3. `tt_net_test` posts a test message. In game, admins get a chat line saying whether it worked;
+   `tt_net` in the server console shows the details, and `tt_trace.log` has a `Net:` line for
+   every failure.
+
+`tt_discord off` removes the webhook; `net_enabled 0` in `tfc_teams.ini` stops posting.
+
+### Keeping the link safe
+
+A webhook link is a password for posting in that channel, so it is **never in `tfc_teams.ini`**:
+
+- It is stored in `tt_secret.dat`, **encrypted with a key made from this machine's own ID**
+  (Windows MachineGuid, Linux `/etc/machine-id`; in a container without one, a random key in the
+  server user's home folder). Copied anywhere else - a backup, an FTP download, GitHub - the file
+  is noise and the plugin there asks for the link again.
+- The plugin never writes the link to `tt_trace.log` or the console; `tt_net` shows only
+  `https://discord.com/api/webhooks/<id>/****`.
+- **rcon is logged:** HLDS writes rcon commands, link included, to its logs, and AMX Mod X logs
+  every `amx_rcon` command line in `addons/amxmodx/logs`. The import file avoids that.
+- Anyone who can run programs on the game server machine itself, as the server's user, can still
+  get it, just as the plugin does.
+
+If the link gets out, delete the webhook in Discord and make a new one.
+
+### How it is sent
+
+On a separate thread, so the game never waits on the network (8-second timeout). Windows uses
+WinHTTP; Linux uses [BearSSL](https://bearssl.org) 0.6 (MIT licence;
+`third_party/bearssl-0.6.tar.gz`, unpacked by `Makefile.linux`) and checks the certificate against
+the system's root certificates, or a built-in set if the system has none (`net_ca_file` for your
+own). If Discord says to slow down (HTTP 429), the plugin waits as told and tries once more.
 
 ## How a player is moved (and why the old scramble plugins didn't)
 
@@ -167,10 +294,11 @@ smallest team, for `balance_delay` seconds.
 The biggest team is ranked like this:
 
 1. Bots come before humans (`balance_prefer_bots`).
-2. Players who picked their team within `balance_new_window` seconds come next, newest first.
-3. Everyone else is ordered by **score fit**: the player whose move brings the two teams' frag
-   totals closest together. A player with f frags moving from a team with B total frags to one
-   with S leaves a gap of |B − S − 2f|.
+2. People who joined with Auto Assign come before people who picked their team (`balance_prefer_auto`).
+3. Players who picked their team within `balance_new_window` seconds come next, newest first.
+4. Everyone else is ordered by **fit**: the player whose move brings the two teams' totals
+   closest together - total skill with `balance_by_skill 1`, this map's frags with 0. A player
+   worth f moving from a team with total B to one with S leaves a gap of |B − S − 2f|.
 
 The top `balance_candidates` are *preferred*. A preferred player is moved the moment they
 are dead. If none of them has died after `balance_patience` seconds, anyone on the big team
@@ -196,8 +324,9 @@ player is told. Set `balance_force_after 0` to only ever move players on death.
 
 ## Scramble rules
 
-When the vote passes, or an admin forces it, players are dealt out by frags, highest first.
-Each goes to the team with the lowest frag total among those still under an even share, so
+When the vote passes, or an admin forces it, players are dealt out by skill (`balance_by_skill 1`;
+this map's frags with 0), best first. Each goes to the team with the lowest total among those
+still under an even share, so
 team sizes end up at most 1 apart. The piles are then matched to team colours so as many
 people as possible stay where they are.
 
@@ -214,7 +343,7 @@ command `tt_stats_save`.
 
 | Say | Shows |
 |---|---|
-| `!stats` / `!stats <name>` | A **window** (TFC's MOTD panel): rating, rank, this map / lifetime time, kills, deaths, K/D, caps, pickups, carrier kills, accuracy, headshots, damage, buildings, the top weapons, and a list of the **classes** played |
+| `!stats` / `!stats <name>` | A **window** (TFC's MOTD panel): rating, rank, this map / lifetime time, kills, deaths, K/D, best kill streak, melee kills, healing (medics), caps, pickups, carrier kills, accuracy, headshots, damage, buildings, the top weapons, and a list of the **classes** played |
 | `!stats <class>` / `!stats <name> <class>` | The same window for **one class**: `!stats soldier`, `!stats engineer` (also `demo`, `hw`, `engy`). Shows that class's numbers and weapons. |
 | `!top10` (`!top`, `!rankings`) | The **rankings window**: the top 15 by rating, with you marked `>>` |
 | `!rank` | Your rank and rating in chat |
@@ -239,10 +368,11 @@ Only `!` works for these. AMX Mod X's stats.amxx already answers `/rank`, `/stat
 
 **End of map.** At intermission, with `stats_summary 2`:
 
-- Every player gets a **window** over the scoreboard. It shows the awards (MVP, most kills, caps,
-  carrier kills, best accuracy with 30 shots minimum, headshots, damage and enemy buildings
-  destroyed), the **best of each class**, and **their own map**: kills, deaths, points, time per
-  class, and the rating change.
+- Every player gets a **window** over the scoreboard. It shows the awards (MVP, most kills, longest
+  kill streak, caps, carrier kills, best accuracy with 30 shots minimum, headshots, damage, melee
+  kills, healing and enemy buildings destroyed), the **best of each class**, and **their own map**:
+  kills, deaths, best streak, points, time per class, and the rating change. With long names and
+  every award given the window would not fit, so the best of each class is then left to `!awards`.
 - **"MAP AWARDS / MVP"** fades in across the top of the screen.
 - The awards go into chat.
 
@@ -291,15 +421,24 @@ addresses.
 - **Grenades and detpacks:** each throw counts as one shot. The pieces a grenade breaks into
   (MIRV bomblets, nail-grenade nails) don't count as extra shots, but their hits and damage go
   to that grenade.
+- **Kill streak:** enemy kills in a row without dying. A teamkill neither adds to it nor ends it;
+  being moved by this plugin doesn't end it either. The award needs a streak of at least 2.
+- **Melee kills:** crowbar (and the civilian's umbrella), spanner, knife and medikit hits. The
+  medic's infection is not melee.
+- **Healing:** TFC logs `"medic" triggered "Medic_Heal" against "team-mate"` when the medikit
+  heals someone (only when they were hurt, or for the overheal of up to 50 over their maximum),
+  and `Medic_Cured_...` / `Medic_Doused_Fire` for cures (`CTFMedikit::AxeHit`, tfc.so 0x125830).
+  The line carries no amount, so the health healed is the team-mate's health right after the heal
+  minus at the start of that server frame.
 - **Not credited:** sentry gun damage and building kills that TFC only tracks internally. Sentry
   kills are credited, from the kill log.
 
 **Rating.** The rating is points per 10 minutes on a team: kill 1, carrier kill +2, cap 5,
-flag pickup 1, teamkill −2. All of these can be changed in the ini. After each map (once
+flag pickup 1, teamkill −2, and optionally healing (`stats_points_heal`, points per 100 health
+healed; 0 by default). All of these can be changed in the ini. After each map (once
 `stats_min_map_minutes` has been played) it becomes 70% of the old rating plus 30% of that map.
-A new player starts at the median rating of everyone known. The spectator-reset scramble deals
-players by this rating, with this map's frags as a tiebreak. The respawn scramble and the
-balancer still use this map's frags.
+A new player starts at the median rating of everyone known. Scrambles and the balancer use this
+rating (see *Matching players*), with this map's frags as a tiebreak.
 
 ### Capture debugging (`stats_debug_caps 1`)
 
@@ -392,4 +531,5 @@ When testing, the lines to look for are `Move OK:` with `class 3->3` (the class 
 
 ## Licence
 
-GPL-3.0. See `LICENSE`.
+GPL-3.0. See `LICENSE`. `third_party/bearssl-0.6.tar.gz` is BearSSL by Thomas Pornin, MIT
+licence (`third_party/BEARSSL-LICENSE.txt`).

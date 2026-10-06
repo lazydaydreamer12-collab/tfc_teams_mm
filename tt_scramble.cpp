@@ -30,6 +30,7 @@
 #include <algorithm>
 
 #include "tt_common.h"
+#include "tt_net.h"
 #include "tt_stats.h"
 
 float g_mapStartTime = 0;
@@ -136,7 +137,8 @@ struct TTPlan
 	int   idx;
 	int   from;
 	int   to;
-	float score;
+	float score;      // what the deal goes by: rank, or a random number (pick_mode random)
+	float strength;   // the player's real rank, for the log
 	int   rnd;
 	bool  fixed;
 };
@@ -259,6 +261,48 @@ static bool TT_BuildPlan(TTPlan *plan, int n, const char **why)
 	return true;
 }
 
+// pick_mode mixed: the rank deal decides who SHOULD swap; a dice roll decides
+// whether each swap happens. Movers from team a to team b are paired with
+// movers from b to a, best with best (the plan is in rank order by now), so a
+// skipped swap takes one player off each side and the team sizes stay as the
+// deal made them. Moves with no partner going the other way - the ones that
+// even out the sizes - always happen.
+static void TT_MixedRolls(TTPlan *plan, int n, int *pairs, int *kept)
+{
+	*pairs = *kept = 0;
+	int k = g_map.playableCount;
+	for (int ia = 0; ia < k; ia++)
+		for (int ib = ia + 1; ib < k; ib++)
+		{
+			int a = g_map.playable[ia], b = g_map.playable[ib];
+			int ab[TT_MAX_PLAYERS], ba[TT_MAX_PLAYERS], nab = 0, nba = 0;
+			for (int j = 0; j < n; j++)
+			{
+				if (plan[j].fixed)
+					continue;
+				if (plan[j].from == a && plan[j].to == b)
+					ab[nab++] = j;
+				else if (plan[j].from == b && plan[j].to == a)
+					ba[nba++] = j;
+			}
+			for (int p = 0; p < nab && p < nba; p++)
+			{
+				(*pairs)++;
+				bool happens = RANDOM_LONG(1, 100) <= g_tt.pickMixedChance;
+				TT_Trace("Scramble (mixed): swap %s <-> %s - rolled %s",
+					STRING(INDEXENT(plan[ab[p]].idx)->v.netname), STRING(INDEXENT(plan[ba[p]].idx)->v.netname),
+					happens ? "IN" : "out, both stay");
+				if (happens)
+				{
+					(*kept)++;
+					continue;
+				}
+				plan[ab[p]].to = a;
+				plan[ba[p]].to = b;
+			}
+		}
+}
+
 static const char *TT_ModeName(int mode)
 {
 	return mode == TT_SCR_RESET ? "spectator reset" : (mode == TT_SCR_NOW ? "now" : "at respawn");
@@ -278,12 +322,15 @@ void TT_ScrambleStart(int mode, const char *who)
 		plan[n].idx = i;
 		plan[n].from = t;
 		plan[n].to = t;
-		// The reset scramble deals by skill rating (tt_stats.cpp); the others by
-		// this map's frags, as before.
-		// (this map's frags stay in as a tiny tiebreak, so equal ratings - everyone
-		// new, say - still get dealt by how this map is going).
-		plan[n].score = (mode == TT_SCR_RESET && g_st.enabled)
+		// Dealt by skill rating (tt_stats.cpp) - always for the reset scramble,
+		// and for the others with balance_by_skill 1; otherwise by this map's
+		// frags. (This map's frags stay in as a tiny tiebreak, so equal ratings -
+		// everyone new, say - still get dealt by how this map is going.)
+		plan[n].strength = ((mode == TT_SCR_RESET || g_tt.balanceBySkill) && g_st.enabled)
 			? TT_StatsRating(e) + TT_Score(e) * 0.001f : TT_Score(e);
+		// pick_mode random: the same deal, by a random number instead - team
+		// sizes still come out even, who is on which side is pure chance.
+		plan[n].score = (g_tt.pickMode == TT_PICK_RANDOM) ? (float)RANDOM_LONG(0, 1000000) : plan[n].strength;
 		plan[n].rnd = RANDOM_LONG(0, 0x7fff);
 		plan[n].fixed = TT_IsBot(e) && !g_tt.scrambleIncludeBots;
 		n++;
@@ -298,12 +345,16 @@ void TT_ScrambleStart(int mode, const char *who)
 		return; // nothing happened, so no cooldown
 	}
 
+	int mixPairs = 0, mixKept = 0;
+	if (g_tt.pickMode == TT_PICK_MIXED)
+		TT_MixedRolls(plan, n, &mixPairs, &mixKept);
+
 	int moves = 0;
 	float sums[TT_MAX_TEAMS + 1] = { 0 };
 	int sizes[TT_MAX_TEAMS + 1] = { 0 };
 	for (int j = 0; j < n; j++)
 	{
-		sums[plan[j].to] += plan[j].score;
+		sums[plan[j].to] += plan[j].strength;
 		sizes[plan[j].to]++;
 		g_pl[plan[j].idx].pendingTeam = 0;
 		if (plan[j].to != plan[j].from)
@@ -313,10 +364,16 @@ void TT_ScrambleStart(int mode, const char *who)
 			moves++;
 		}
 	}
-	TT_Trace("Scramble (%s, %s): %d players, %d to move. New teams: %s %d (%.0f) | %s %d (%.0f) | %s %d (%.0f) | %s %d (%.0f)",
-		who, TT_ModeName(mode), n, moves,
+	TT_Trace("Scramble (%s, %s, pick %s): %d players, %d to move. New teams: %s %d (%.0f) | %s %d (%.0f) | %s %d (%.0f) | %s %d (%.0f)",
+		who, TT_ModeName(mode), TT_PickModeName(g_tt.pickMode), n, moves,
 		TT_TeamName(1), sizes[1], sums[1], TT_TeamName(2), sizes[2], sums[2],
 		TT_TeamName(3), sizes[3], sums[3], TT_TeamName(4), sizes[4], sums[4]);
+
+	// Mixed: say how the dice fell, so a scramble that moves fewer people
+	// than expected (or nobody) does not look broken.
+	if (mixPairs)
+		TT_SayAll("%s Mixed scramble: %d of %d swap%s rolled in (%d%% chance each).", TT_TAG,
+			mixKept, mixPairs, mixPairs == 1 ? "" : "s", g_tt.pickMixedChance);
 
 	if (mode == TT_SCR_RESET)
 	{
@@ -348,7 +405,10 @@ void TT_ScrambleStart(int mode, const char *who)
 
 	if (moves == 0)
 	{
-		TT_SayAll("%s Scramble: the teams are already as even as they can be - nobody needs to move.", TT_TAG);
+		if (mixPairs)
+			TT_SayAll("%s Scramble: the dice kept everyone where they are.", TT_TAG);
+		else
+			TT_SayAll("%s Scramble: the teams are already as even as they can be - nobody needs to move.", TT_TAG);
 		g_lastEnd = gpGlobals->time;
 		return;
 	}
@@ -670,7 +730,10 @@ void TT_ScrambleFrame(void)
 		if (TT_VoteBlockedReason(buf, sizeof(buf)))
 			return; // cannot start right now - votes wait
 		TT_Trace("Vote: threshold reached (%d/%d of %d eligible)", votes, needed, pop);
-		TT_ScrambleStart(g_tt.scrambleMode, "vote");
+		char who[48];
+		_snprintf_wc(who, sizeof(who) - 1, "vote %d/%d", votes, needed);
+		who[sizeof(who) - 1] = 0;
+		TT_ScrambleStart(g_tt.scrambleMode, who);
 	}
 }
 
@@ -708,8 +771,14 @@ void TT_PrintStatus(edict_t *to)
 		TT_Say(to, "%s Scramble under way: %d move%s still waiting for a respawn.", TT_TAG, left, left == 1 ? "" : "s");
 	}
 	else
+	{
 		TT_Say(to, "%s Scramble votes: %d of %d needed (%d eligible). Mode on this map: %s.", TT_TAG, votes, needed, pop,
 			g_tt.scrambleMode == TT_SCR_RESET ? "reset (everyone to spectator, then placed)" : "respawn (moved at next death)");
+		if (g_tt.pickMode == TT_PICK_RANDOM)
+			TT_Say(to, "%s Teams are picked at random here, not by rank.", TT_TAG);
+		else if (g_tt.pickMode == TT_PICK_MIXED)
+			TT_Say(to, "%s Teams are picked by rank, then each swap rolls a %d%% chance.", TT_TAG, g_tt.pickMixedChance);
+	}
 }
 
 static void TT_CastVote(edict_t *p)
@@ -740,7 +809,10 @@ static void TT_CastVote(edict_t *p)
 	if (votes >= needed)
 	{
 		TT_SayAll("%s %s voted to scramble - that's enough votes (%d/%d).", TT_TAG, STRING(p->v.netname), votes, needed);
-		TT_ScrambleStart(g_tt.scrambleMode, "vote");
+		char who[48];
+		_snprintf_wc(who, sizeof(who) - 1, "vote %d/%d", votes, needed);
+		who[sizeof(who) - 1] = 0;
+		TT_ScrambleStart(g_tt.scrambleMode, who);
 	}
 	else
 		TT_SayAll("%s %s wants to scramble the teams (%d/%d). Say !scramble to agree.",
@@ -794,6 +866,8 @@ bool TT_ChatCommand(edict_t *p, const char *raw)
 		TT_PrintStatus(p);
 		return false;
 	}
+	if (TT_Is(word, "names"))
+		return TT_NamesChat(p, rest); // hidden from chat: an admin's lookup
 	if (TT_Is(word, "forcescramble") || TT_Is(word, "cancelscramble"))
 	{
 		if (!TT_IsAdmin(p))
