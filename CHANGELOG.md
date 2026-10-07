@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.1.3
+
+- **Bots even the teams sooner** (`balance_bot_delay`, default 10 s). FoxBot counts
+  spectators toward its bot total and kicks bots from either team when humans join, which
+  left gaps like 5 v 3 standing for minutes behind `balance_delay`. When the big team has a
+  bot that can move, the first one to die is moved after `balance_bot_delay`, or the
+  best-placed one is moved alive after another `balance_bot_delay`. Humans still wait for
+  `balance_delay`. `balance_bot_delay 0` turns this off.
+- Chat lines with a `%` in them lost letters on players' screens: the mixed-scramble line read
+  "(50 hance each)". The game's client treats chat text as a format string, so every `%` is
+  now sent doubled and shows as one.
+
+## 1.1.2
+
+- Fixes 1.1.1, which stopped seeing bots at all: FoxBot adds its bots without the plugin
+  being told, and 1.1.1 only counted players it had been told about. Scrambles and balancing
+  saw only the humans ("2 players, 0 to move"), and the join block counted 2 v 0 with bots on
+  both teams. Bots are now picked up the first time they move.
+
+## 1.1.1
+
+- A player connecting into a slot a bot had just left was taken for that bot while their
+  game was still loading: counted on the bot's team, and given a stats record named
+  `BOT:<their name>`. Players now count only once they are in the game: put in the server,
+  or - for bots, which FoxBot adds without the plugin being told - seen playing.
+- The capture debug lines (`CAPDBG`) no longer show an item from the previous map or the
+  slot's previous player.
+
 ## 1.1.0
 
 **Matching players**

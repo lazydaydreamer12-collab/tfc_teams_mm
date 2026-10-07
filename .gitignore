@@ -25,6 +25,8 @@ obj_linux/
 tt_trace.log
 tt_stats.txt
 tt_names.txt
+tt_net_state.txt
+tt_trace.old.log
 # The Discord webhook - never commit these
 tt_secret.dat
 tt_secret.key

@@ -178,7 +178,7 @@ plugin_info_t Plugin_info =
 {
 	META_INTERFACE_VERSION,
 	"TFC Teams (balance + scramble)",
-	"1.1.0",
+	"1.1.3",
 	"2026/10/06",
 	"custom",
 	"",
@@ -242,7 +242,10 @@ C_DLLEXPORT FORCE_STACK_ALIGN int Meta_Attach(PLUG_LOADTIME now,
 	// ServerActivate has been and gone, so do its work now. The team layout
 	// comes from the .bsp in that case - see tt_map.cpp.
 	if (now != PT_STARTUP && gpGlobals && gpGlobals->mapname && STRING(gpGlobals->mapname)[0])
+	{
 		TT_OnMapStart();
+		TT_PlayersAdoptExisting();
+	}
 	else
 		TT_ConfigLoad();
 	return TRUE;

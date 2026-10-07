@@ -71,6 +71,7 @@ struct TTConfig
 	int   balancePreferBots;
 	float balanceForceAfter;    // nobody on the big team died for this long: move someone alive (0 = never)
 	float balanceForceWarn;     // ...after warning them this many seconds first
+	float balanceBotDelay;      // a bot can even the teams: act after this long instead (0 = use balanceDelay)
 	int   blockUnevenJoin;
 	int   adminImmunity;        // admins are never auto-moved or join-blocked
 
@@ -173,6 +174,8 @@ extern TTPlayer g_pl[TT_MAX_PLAYERS + 1];
 
 edict_t *TT_Player(int idx);              // NULL unless a live, in-game client
 bool TT_IsBot(edict_t *p);
+void TT_PlayersAdoptExisting(void);   // mid-map load only
+void TT_PlayerThinking(edict_t *p);   // every PlayerPreThink: picks up bots, whose arrival no hook sees
 bool TT_IsHLTV(edict_t *p);
 bool TT_IsAdmin(edict_t *p);
 int  TT_PlayerTeam(edict_t *p);           // playable team or 0

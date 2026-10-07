@@ -119,8 +119,13 @@ edict_t *TT_Player(int idx)
 	edict_t *e = INDEXENT(idx);
 	if (FNullEnt(e) || e->free)
 		return NULL;
-	// FL_CLIENT is set when the player is put in the server, not at connect,
-	// so someone still downloading is not counted anywhere.
+	// Only once the game has put them in the server (ClientPutInServer). A
+	// client slot is reused without being cleared: someone connecting into the
+	// slot a kicked bot had has that bot's flags (FL_CLIENT, FL_FAKECLIENT) and
+	// team on the edict until they are put in the server, which made them look
+	// like a bot already on a team while still loading.
+	if (!g_pl[idx].inGame)
+		return NULL;
 	if (!(e->v.flags & FL_CLIENT))
 		return NULL;
 	if (!e->v.netname || !STRING(e->v.netname)[0])
@@ -209,6 +214,44 @@ void TT_PlayersReset(void)
 	memset(g_pl, 0, sizeof(g_pl));
 }
 
+// Loaded mid-map ("meta load"): everyone already playing was put in the
+// server before we were here to see it. Called once, right after the map
+// state is set up; the engine has filled these slots, so their data is real.
+void TT_PlayersAdoptExisting(void)
+{
+	float now = gpGlobals->time;
+	for (int i = 1; i <= gpGlobals->maxClients && i <= TT_MAX_PLAYERS; i++)
+	{
+		edict_t *e = INDEXENT(i);
+		if (FNullEnt(e) || e->free || !e->pvPrivateData || !(e->v.flags & FL_CLIENT)
+			|| !e->v.netname || !STRING(e->v.netname)[0])
+			continue;
+		TT_ResetSlot(i);
+		g_pl[i].inGame = true;
+		g_pl[i].connectedAt = now;
+		g_pl[i].lastActive = now;
+		g_pl[i].lastTeam = -1;
+		TT_StatsPlayerConnect(e);
+	}
+}
+
+// The engine runs a client's PlayerPreThink only once that client is really in
+// the game - never for one still loading. Bots arrive by a route no plugin sees:
+// FoxBot hands its bots to the game DLL directly (ClientConnect and
+// ClientPutInServer straight into tfc.so), so the put-in-server hook never
+// fires for them. Their first PreThink is the first sign of them, and a safe
+// one: a slot someone is still loading into does not think.
+void TT_PlayerThinking(edict_t *p)
+{
+	int idx = ENTINDEX(p);
+	if (idx < 1 || idx > TT_MAX_PLAYERS || g_pl[idx].inGame)
+		return;
+	if (FNullEnt(p) || p->free || !p->pvPrivateData || !p->v.netname || !STRING(p->v.netname)[0])
+		return;
+	TT_PlayerConnect(p);
+	TT_StatsPlayerConnect(p);
+}
+
 void TT_PlayerConnect(edict_t *p)
 {
 	int idx = ENTINDEX(p);
@@ -241,16 +284,6 @@ void TT_PlayersFrame(void)
 			if (s.inGame)
 				TT_ResetSlot(i);
 			continue;
-		}
-		if (!s.inGame)
-		{
-			// Already here when the plugin loaded, or the put-in-server call
-			// was missed: adopt them with "now" as their join time.
-			TT_ResetSlot(i);
-			s.inGame = true;
-			s.connectedAt = now;
-			s.lastActive = now;
-			s.lastTeam = -1;
 		}
 
 		int team = (int)e->v.team;

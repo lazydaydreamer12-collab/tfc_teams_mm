@@ -337,10 +337,42 @@ void TT_BalanceFrame(void)
 		g_nextEval = now + 0.5f;
 		TT_Evaluate();
 	}
-	if (!g_imbalSince || now - g_imbalSince < g_tt.balanceDelay)
+	if (!g_imbalSince)
 		return;
 
-	if (!g_announced)
+	// A bot can even the teams (balance_bot_delay). FoxBot fills the server
+	// up to a head count that includes spectators, and when a human joins it
+	// kicks a bot from whichever team it likes - so a 5 v 3 can sit there
+	// until somebody leaves. Moving a bot upsets nobody, so it is done
+	// sooner than moving a person: after balance_bot_delay instead of
+	// balance_delay, at the bot's next death, or alive once another
+	// balance_bot_delay has gone by without one.
+	bool botFaster = g_tt.balanceBotDelay > 0 && g_tt.balanceBotDelay < g_tt.balanceDelay;
+	if (now - g_imbalSince < (botFaster ? g_tt.balanceBotDelay : g_tt.balanceDelay))
+		return;
+	edict_t *botPick = NULL;
+	int botPickIdx = 0;
+	if (botFaster)
+	{
+		for (int j = 0; j < g_rankCount && !botPick; j++)
+		{
+			int i = g_rank[j];
+			edict_t *e = TT_Player(i);
+			if (e && TT_IsBot(e) && TT_PlayerTeam(e) == g_bigTeam && TT_Eligible(i, e)
+				&& !TT_CarryingGoalItem(e))
+			{
+				botPick = e;
+				botPickIdx = i;
+			}
+		}
+	}
+	float delay = botPick ? g_tt.balanceBotDelay : g_tt.balanceDelay;
+	if (now - g_imbalSince < delay)
+		return;
+
+	// Bot moves are quiet until they happen (FoxBot adds and kicks bots all
+	// the time at a map start; announcing each gap would flood the chat).
+	if (!g_announced && !botPick)
 	{
 		g_announced = true;
 		TT_SayAll("%s Teams are uneven (%s %d v %s %d) - evening them out as players respawn.",
@@ -348,11 +380,14 @@ void TT_BalanceFrame(void)
 			TT_TeamName(g_smallTeam), g_counts[g_smallTeam]);
 	}
 
-	bool anyone = (now - g_imbalSince - g_tt.balanceDelay) >= g_tt.balancePatience;
+	bool anyone = !botPick && (now - g_imbalSince - delay) >= g_tt.balancePatience;
 	for (int i = 1; i <= gpGlobals->maxClients && i <= TT_MAX_PLAYERS; i++)
 	{
 		edict_t *e = TT_Player(i);
 		if (!e || TT_PlayerTeam(e) != g_bigTeam || !TT_MovableNow(e))
+			continue;
+		// Before balance_delay is up, only bots are moved.
+		if (botPick && now - g_imbalSince < g_tt.balanceDelay && !TT_IsBot(e))
 			continue;
 		if (now < g_pl[i].nextMoveTry || !TT_Eligible(i, e))
 			continue;
@@ -363,6 +398,9 @@ void TT_BalanceFrame(void)
 		bool preferred = false;
 		for (int j = 0; j < g_prefCount; j++)
 			if (g_pref[j] == i) { preferred = true; break; }
+		// Any dead bot will do: the preferred list may be all humans.
+		if (botPick && TT_IsBot(e))
+			preferred = true;
 		if (!preferred && !anyone)
 			continue;
 
@@ -390,6 +428,34 @@ void TT_BalanceFrame(void)
 			return;
 		}
 	}
+
+	// No bot on the big team died within another balance_bot_delay: move the
+	// best-placed bot alive. No warning - it is a bot. TFC's TeamSet kills it
+	// on the way over and hands the frag back.
+	if (botPick && now - g_imbalSince - delay >= g_tt.balanceBotDelay
+		&& now >= g_pl[botPickIdx].nextMoveTry && now - g_pl[botPickIdx].teamJoinedAt >= 1.2f)
+	{
+		int from = g_bigTeam, to = g_smallTeam;
+		if (TT_MovePlayer(botPick, to, "balance: bot moved alive"))
+		{
+			int counts[TT_MAX_TEAMS + 1];
+			TT_TeamCounts(counts, NULL, 0, false);
+			TT_SayAll("%s %s was moved to %s to even the teams (%s %d v %s %d).",
+				TT_TAG, STRING(botPick->v.netname), TT_TeamName(to),
+				TT_TeamName(from), counts[from], TT_TeamName(to), counts[to]);
+			if (g_forceIdx)
+				TT_ClearForce("a bot was moved instead");
+			g_nextEval = 0;
+			g_imbalSince = 0;
+			g_announced = true;
+			TT_Evaluate();
+			if (g_imbalSince)
+				g_imbalSince = now - g_tt.balanceBotDelay; // still uneven: next bot at its death
+		}
+		return;
+	}
+	if (botPick)
+		return; // a bot will fix it; humans are not warned meanwhile
 
 	// STALEMATE BREAKER. Nobody on the big team has died for
 	// balance_force_after seconds - someone AFK in spawn, or a defence that

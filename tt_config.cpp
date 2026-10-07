@@ -38,6 +38,7 @@ void TT_ConfigDefaults(void)
 	g_tt.balancePreferBots   = 1;
 	g_tt.balanceForceAfter   = 60.0f;
 	g_tt.balanceForceWarn    = 10.0f;
+	g_tt.balanceBotDelay     = 10.0f;
 	g_tt.blockUnevenJoin     = 1;
 	g_tt.adminImmunity       = 0;
 
@@ -108,6 +109,7 @@ static void ApplyKey(const char *key, const char *val, int line)
 	else if (!strcasecmp(key, "balance_prefer_bots"))    g_tt.balancePreferBots = iv ? 1 : 0;
 	else if (!strcasecmp(key, "balance_force_after"))    g_tt.balanceForceAfter = ClampF(fv, 0, 3600);
 	else if (!strcasecmp(key, "balance_force_warn"))     g_tt.balanceForceWarn = ClampF(fv, 0, 60);
+	else if (!strcasecmp(key, "balance_bot_delay"))      g_tt.balanceBotDelay = ClampF(fv, 0, 600);
 	else if (!strcasecmp(key, "block_uneven_join"))      g_tt.blockUnevenJoin = iv ? 1 : 0;
 	else if (!strcasecmp(key, "admin_immunity"))         g_tt.adminImmunity = iv ? 1 : 0;
 	else if (!strcasecmp(key, "vote_enabled"))           g_tt.voteEnabled = iv ? 1 : 0;
@@ -452,10 +454,10 @@ void TT_ConfigLoad(void)
 	if (g_tt.amxxUsers)
 		LoadAmxxUsers();
 
-	TT_Trace("Config (%s): balance=%d threshold=%d delay=%.0f patience=%.0f new=%.0f cand=%d immunity=%.0f bots=%d/%d force=%.0f/%.0f block=%d | vote=%d %.0f%% min=%d start=%.0f cool=%.0f afk=%.0f spec=%d wait=%.0f bots=%d mode=%s reset=%.1fs frags=%d | admins=%d",
+	TT_Trace("Config (%s): balance=%d threshold=%d delay=%.0f patience=%.0f new=%.0f cand=%d immunity=%.0f bots=%d/%d botdelay=%.0f force=%.0f/%.0f block=%d | vote=%d %.0f%% min=%d start=%.0f cool=%.0f afk=%.0f spec=%d wait=%.0f bots=%d mode=%s reset=%.1fs frags=%d | admins=%d",
 		map[0] ? map : "?", g_tt.balanceEnabled, g_tt.balanceThreshold, g_tt.balanceDelay, g_tt.balancePatience,
 		g_tt.balanceNewWindow, g_tt.balanceCandidates, g_tt.balanceImmunity,
-		g_tt.balanceIncludeBots, g_tt.balancePreferBots,
+		g_tt.balanceIncludeBots, g_tt.balancePreferBots, g_tt.balanceBotDelay,
 		g_tt.balanceForceAfter, g_tt.balanceForceWarn, g_tt.blockUnevenJoin,
 		g_tt.voteEnabled, g_tt.votePercent, g_tt.voteMinVotes, g_tt.voteMapStartDelay,
 		g_tt.voteCooldown, g_tt.voteAfkTime, g_tt.voteCountSpectators,

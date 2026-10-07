@@ -787,6 +787,22 @@ static int TT_IdxOf(const edict_t *e)
 	return TT_Player(i) ? i : 0;
 }
 
+// Goal items, per player slot. Entity pointers: they mean nothing on the next
+// map or to the next person in the slot, so they are cleared with the slot.
+static edict_t *g_carriedItem[TT_MAX_PLAYERS + 1];   // this frame
+static edict_t *g_lastItem[TT_MAX_PLAYERS + 1];      // the last item each player carried
+
+static void TT_ClearItems(int idx)
+{
+	if (idx < 0)
+	{
+		memset(g_carriedItem, 0, sizeof(g_carriedItem));
+		memset(g_lastItem, 0, sizeof(g_lastItem));
+	}
+	else if (idx <= TT_MAX_PLAYERS)
+		g_carriedItem[idx] = g_lastItem[idx] = NULL;
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 void TT_StatsInit(void)
@@ -815,6 +831,7 @@ void TT_StatsMapStart(void)
 		memset(&g_ss[i], 0, sizeof(g_ss[i]));
 		g_ss[i].rec = rec;
 	}
+	TT_ClearItems(-1);
 	memset(g_eventW, 0, sizeof(g_eventW)); // refilled as this map precaches
 	for (size_t i = 0; i < g_vs.size(); i++)
 		g_vs[i].mab = g_vs[i].mba = 0;
@@ -847,6 +864,7 @@ void TT_StatsPlayerConnect(edict_t *p)
 		return;
 	memset(&g_ss[idx], 0, sizeof(g_ss[idx]));
 	g_ss[idx].rec = -1;
+	TT_ClearItems(idx);
 	TT_Resolve(idx, p);
 }
 
@@ -859,6 +877,7 @@ void TT_StatsPlayerDisconnect(edict_t *p)
 	TT_RateMap(idx);
 	memset(&g_ss[idx], 0, sizeof(g_ss[idx]));
 	g_ss[idx].rec = -1;
+	TT_ClearItems(idx);
 	TT_StatsMenuGone(p);
 }
 
@@ -992,8 +1011,6 @@ void TT_StatsPrivateText(edict_t *to, const char *msg)
 	TT_BUMPW(idx, W_SNIPER, headshots, 1);
 }
 
-static edict_t *g_carriedItem[TT_MAX_PLAYERS + 1];   // this frame
-static edict_t *g_lastItem[TT_MAX_PLAYERS + 1];      // the last item each player carried
 
 // CAPTURE DEBUGGING. Caps differ from map to map (flags carried to a point,
 // command points, keys...), so while the detection is being checked against

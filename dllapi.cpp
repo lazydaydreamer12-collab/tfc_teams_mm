@@ -127,6 +127,7 @@ static void TT_StartFrame(void)
 // frame - see tt_stats.cpp.
 static void TT_PlayerPreThink(edict_t *pEntity)
 {
+	TT_PlayerThinking(pEntity);
 	if (g_tt.enabled)
 		TT_StatsPreThink(pEntity);
 	RETURN_META(MRES_IGNORED);

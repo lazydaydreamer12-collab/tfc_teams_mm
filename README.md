@@ -322,6 +322,19 @@ If they die during the warning, they are moved then instead. If they pick up the
 the warning, someone else is chosen. If the teams even out, the move is called off and the
 player is told. Set `balance_force_after 0` to only ever move players on death.
 
+**When a bot can even the teams**, it is done sooner (`balance_bot_delay`, 10 seconds by
+default). FoxBot fills the server up to a head count that includes spectators, and when a
+human joins it kicks a bot from whichever team it picks, so a 5 v 3 can otherwise sit there
+until someone leaves. If the big team has a bot that is free to move (not immune, not
+carrying a goal item), the plugin acts after `balance_bot_delay` instead of `balance_delay`:
+
+1. The first bot on the big team to die is moved.
+2. If none dies within another `balance_bot_delay` seconds, the best-ranked bot is moved
+   alive, with no warning (TFC kills it on the way over and hands the frag back).
+
+Humans are not moved and not warned while this is happening; they are only considered once
+`balance_delay` is up. Set `balance_bot_delay 0` to treat bots like everyone else.
+
 ## Scramble rules
 
 When the vote passes, or an admin forces it, players are dealt out by skill (`balance_by_skill 1`;

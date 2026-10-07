@@ -379,9 +379,25 @@ static void TT_SendText(edict_t *p, int dest, const char *text)
 	if (id <= 0 || !text || !text[0])
 		return;
 	// A leading '#' would make the client look it up as a titles.txt key.
+	// The client also runs the text through printf as the FORMAT
+	// (CHudTextMessage::MsgFunc_TextMsg), so a lone '%' eats the next letters:
+	// "50% chance" showed as "50 hance". Every '%' goes out doubled.
 	char buf[190];
-	_snprintf_wc(buf, sizeof(buf) - 1, "%s%s\n", text[0] == '#' ? " " : "", text);
-	buf[sizeof(buf) - 1] = 0;
+	size_t n = 0;
+	if (text[0] == '#')
+		buf[n++] = ' ';
+	for (const char *s = text; *s && n < sizeof(buf) - 3; s++)
+	{
+		if (*s == '%')
+		{
+			if (n >= sizeof(buf) - 4)
+				break;
+			buf[n++] = '%';
+		}
+		buf[n++] = *s;
+	}
+	buf[n++] = '\n';
+	buf[n] = 0;
 	if (p)
 	{
 		if (FNullEnt(p) || TT_IsBot(p))
